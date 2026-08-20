@@ -179,5 +179,3 @@ Light-wallet architecture (MyMonero model): the server scans the chain with your
 It can observe incoming transactions but can never spend funds — spend keys exist only inside
 the panel page, encrypted at rest with your password. Dapps never receive keys of any kind;
 they get an address only after you approve the origin, and every send is user-confirmed.
-
-See `HANDOFF.md` for build conventions, security-review history, and per-file detail.
