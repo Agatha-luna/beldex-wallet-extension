@@ -8,3 +8,4 @@ firefox-testnet/
 *.log
 .DS_Store
 SECURITY_AUDIT.md
+HANDOFF.md
