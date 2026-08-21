@@ -1,9 +1,11 @@
-// Coverage for the hand-written embind patch (patches/@bdxi+beldex-app-bridge).
-// That patch replaces embind's `new Function`-based argument marshalling (banned
-// by the MV3 CSP) with hand-written runtime marshalling. These tests exercise
-// every bridge call the extension uses and run under Node's
-// --disallow-code-generation-from-strings flag (see npm script) — the same
-// restriction the browser CSP enforces — so a regression in the patch fails here.
+// Coverage for the bridge's MV3-CSP-safe embind marshalling. Upstream
+// @bdxi/beldex-app-bridge 3.0.1 replaced embind's `new Function`-based argument
+// marshalling (banned by the MV3 CSP) with eval-free runtime marshalling
+// (formerly carried here as a patch-package patch — see HANDOFF.md). The
+// dependency is exact-pinned; these tests exercise every bridge call
+// the extension uses and run under Node's --disallow-code-generation-from-strings
+// flag (see npm script) — the same restriction the browser CSP enforces — so a
+// CSP regression in any future bridge bump fails here.
 //
 //   node --disallow-code-generation-from-strings --test test/bridge.test.mjs
 

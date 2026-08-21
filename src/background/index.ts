@@ -109,19 +109,22 @@ async function endSession(): Promise<void> {
 
 // ---- brute-force backoff --------------------------------------------------------
 //
-// Persisted in storage.session so it survives the service worker idling out
-// (~30s) — otherwise an attacker could reset the counter just by waiting for the
-// SW to unload. Still cleared on browser exit (session storage), which is fine.
-// The real defense remains the PBKDF2-600k KDF; this is friction against rapid
-// scripted guessing through the message channel.
+// Persisted in storage.local so it survives both the service worker
+// idling out (~30s) AND a full browser restart — previously session-scoped,
+// which let an attacker reset the counter with a relaunch. The cap is 10
+// minutes (was 60s). An attacker with the profile ON DISK still brute-forces
+// the vault offline against PBKDF2-600k regardless of any of this — the real
+// defenses are the KDF and password strength; this is friction against
+// scripted guessing through the message channel. (Planned follow-up: migrate
+// the KDF to Argon2id — see keyring.ts.)
 
 interface BackoffEntry { fails: number; nextAllowedAt: number }
 const BACKOFF_KEY = 'backoff_state'
 const BACKOFF_THRESHOLD = 5
-const BACKOFF_CAP_MS = 60_000
+const BACKOFF_CAP_MS = 10 * 60_000
 
 async function getBackoff(): Promise<Record<string, BackoffEntry>> {
-  return ((await sessionStore.get(BACKOFF_KEY))[BACKOFF_KEY] as Record<string, BackoffEntry>) ?? {}
+  return ((await chrome.storage.local.get(BACKOFF_KEY))[BACKOFF_KEY] as Record<string, BackoffEntry>) ?? {}
 }
 
 /** Returns an error message if this wallet is still in backoff, else null. */
@@ -129,7 +132,8 @@ async function backoffCheck(walletId: string): Promise<string | null> {
   const e = (await getBackoff())[walletId]
   if (e && Date.now() < e.nextAllowedAt) {
     const secs = Math.ceil((e.nextAllowedAt - Date.now()) / 1000)
-    return `Too many attempts — try again in ${secs}s`
+    const human = secs >= 60 ? `${Math.ceil(secs / 60)}m` : `${secs}s`
+    return `Too many attempts — try again in ${human}`
   }
   return null
 }
@@ -139,19 +143,19 @@ async function backoffRecordFailure(walletId: string): Promise<void> {
   const e = state[walletId] ?? { fails: 0, nextAllowedAt: 0 }
   e.fails++
   if (e.fails >= BACKOFF_THRESHOLD) {
-    // 5th failure -> 2s, then 4s, 8s, ... capped at 60s
+    // 5th failure -> 2s, then 4s, 8s, ... capped at 10 minutes
     const delay = Math.min(2 ** (e.fails - BACKOFF_THRESHOLD + 1) * 1000, BACKOFF_CAP_MS)
     e.nextAllowedAt = Date.now() + delay
   }
   state[walletId] = e
-  await sessionStore.set({ [BACKOFF_KEY]: state })
+  await chrome.storage.local.set({ [BACKOFF_KEY]: state })
 }
 
 async function backoffReset(walletId: string): Promise<void> {
   const state = await getBackoff()
   if (walletId in state) {
     delete state[walletId]
-    await sessionStore.set({ [BACKOFF_KEY]: state })
+    await chrome.storage.local.set({ [BACKOFF_KEY]: state })
   }
 }
 

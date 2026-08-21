@@ -94,6 +94,18 @@ function err(code: number, message: string): { code: number; message: string } {
   return { code, message }
 }
 
+/** Plain-http origins (except loopback, kept for dapp development)
+ *  can be impersonated by an active network attacker, which would defeat the
+ *  origin-based grant model. content_scripts.matches already excludes them;
+ *  this is defense in depth so a manifest drift can never re-enable granting
+ *  an impersonatable origin. */
+export function insecureOrigin(origin: string): boolean {
+  if (!origin.startsWith('http://')) return false
+  let host: string
+  try { host = new URL(origin).hostname } catch { return true }
+  return host !== 'localhost' && host !== '127.0.0.1' && host !== '[::1]' && host !== '::1'
+}
+
 /** Does `origin` hold a grant for the ACTIVE wallet? Returns activeId or null. */
 async function grantedActiveId(origin: string): Promise<string | null> {
   const [grants, activeId] = await Promise.all([getGrants(), getActiveId()])
@@ -129,7 +141,9 @@ export async function dappActiveTabSite(): Promise<{ origin: string; connected: 
 }
 
 /** Push an event to every connected origin holding a grant for `walletId`
- *  (or for ANY wallet when walletId is null — used for lock/unlock). */
+ *  (or for ANY wallet when walletId is null — used only for accountsChanged
+ *  on wallet switch, where every grantee must learn it lost its connection;
+ *  lock/unlock are scoped per-wallet). */
 async function broadcast(event: DappEvent, data: unknown, walletId: string | null): Promise<void> {
   const grants = await getGrants()
   const origins = new Set(
@@ -143,13 +157,18 @@ async function broadcast(event: DappEvent, data: unknown, walletId: string | nul
 // Called from background/index.ts at the relevant state transitions:
 
 export async function dappNotifyLocked(): Promise<void> {
-  await broadcast('lock', {}, null)
+  // Scoped to the ACTIVE wallet's grantees. A site granted only for
+  // another wallet must not observe this wallet's lock/unlock activity —
+  // that's cross-wallet linkage the per-wallet grant model exists to prevent.
+  const activeId = await getActiveId()
+  if (activeId) await broadcast('lock', {}, activeId)
 }
 
 export async function dappNotifyUnlocked(address: string): Promise<void> {
-  await broadcast('unlock', {}, null)
   const activeId = await getActiveId()
-  if (activeId) await broadcast('connect', { address, network: nettype() }, activeId)
+  if (!activeId) return
+  await broadcast('unlock', {}, activeId) // active wallet's grantees only
+  await broadcast('connect', { address, network: nettype() }, activeId)
 }
 
 export async function dappNotifyWalletSwitched(): Promise<void> {
@@ -304,9 +323,25 @@ export function validateSendParams(params: unknown): { ok: true; send: Validated
  *  card can show ALL of it — the user must never approve text they cannot see. */
 const MAX_SIGN_MESSAGE = 512
 
-/** Validate bdx_signMessage params (PROTOCOL.md §4.6). Control characters are
- *  rejected so a message cannot hide its real content behind newlines or
- *  terminal escapes in the approval card. */
+/** Characters that could make the approval card RENDER differently from the
+ *  logical bytes the user signs:
+ *  - \x00-\x1f, \x7f     ASCII control (newlines, terminal escapes)
+ *  - \u00ad               soft hyphen (invisible)
+ *  - \u200b-\u200f       zero-width space/joiners + LRM/RLM direction marks
+ *  - \u2028, \u2029      Unicode line/paragraph separators
+ *  - \u202a-\u202e       bidi embeddings/overrides (LRE/RLE/PDF/LRO/RLO —
+ *                        RLO can visually reverse "attacker" into innocuous text)
+ *  - \u2060-\u2064       word joiner + invisible operators
+ *  - \u2066-\u2069       bidi isolates (LRI/RLI/FSI/PDI)
+ *  - \ufeff               zero-width no-break space / BOM
+ *  The user must see exactly what they sign, so these are rejected outright. */
+// eslint-disable-next-line no-control-regex
+const DISALLOWED_SIGN_CHARS =
+  /[\x00-\x1f\x7f\u00ad\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/
+
+/** Validate bdx_signMessage params (PROTOCOL.md §4.6). Control characters and
+ *  invisible/direction-control Unicode are rejected so a message cannot hide
+ *  or visually reorder its real content in the approval card. */
 export function validateSignParams(params: unknown): { ok: true; message: string } | { ok: false; error: string } {
   const p = (params ?? {}) as Record<string, unknown>
   if (typeof p.message !== 'string' || p.message.length === 0) {
@@ -315,9 +350,8 @@ export function validateSignParams(params: unknown): { ok: true; message: string
   if (p.message.length > MAX_SIGN_MESSAGE) {
     return { ok: false, error: `invalid field "message" (max ${MAX_SIGN_MESSAGE} characters)` }
   }
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f\x7f]/.test(p.message)) {
-    return { ok: false, error: 'invalid field "message" (control characters are not allowed)' }
+  if (DISALLOWED_SIGN_CHARS.test(p.message)) {
+    return { ok: false, error: 'invalid field "message" (control, invisible or direction-control characters are not allowed)' }
   }
   return { ok: true, message: p.message }
 }
@@ -379,6 +413,30 @@ async function removePending(reqId: string): Promise<PendingMeta | null> {
     pendingLive.delete(reqId)
   }
   return meta
+}
+
+/** The one-pending-per-origin and one-pending-send rules must hold
+ *  across service-worker restarts, so consult BOTH the live map and the
+ *  persisted storage.session metadata (which survives the restart; its live
+ *  reply channel does not). Expired persisted entries are pruned on the way.
+ *  Deliberately NOT pruned merely for being orphaned: a persisted connect
+ *  approval stays actionable after a restart (the grant persists; the page
+ *  just calls connect() again — see the header comment). */
+async function pendingConflicts(origin: string): Promise<{ origin: boolean; send: boolean }> {
+  const now = Date.now()
+  let originPending = false
+  let sendPending = false
+  for (const p of pendingLive.values()) {
+    if (p.origin === origin) originPending = true
+    if (p.method === 'bdx_sendTransaction') sendPending = true
+  }
+  const all: Record<string, PendingMeta> = (await sessionStore.get(PENDING_KEY))[PENDING_KEY] ?? {}
+  for (const [reqId, meta] of Object.entries(all)) {
+    if (now - meta.createdAt > APPROVAL_TTL_MS) { await removePending(reqId); continue }
+    if (meta.origin === origin) originPending = true
+    if (meta.method === 'bdx_sendTransaction') sendPending = true
+  }
+  return { origin: originPending, send: sendPending }
 }
 
 function settlePending(reqId: string, msg: { result?: unknown; error?: { code: number; message: string } }): void {
@@ -476,20 +534,31 @@ async function handleMethod(
 
   switch (req.method) {
     case 'bdx_getState': {
+      // Rate-limited (was a free service-worker keep-alive and
+      // fingerprinting oracle), and lock-state granularity is reserved for
+      // origins the user granted — everyone else learns only that a provider
+      // exists ('locked' covers both, and the connect flow works from it).
+      if (!readAllowed(origin)) return fail(err(ERR.INTERNAL, 'rate limited — slow down'))
       const wallets = await getWallets()
       if (Object.keys(wallets).length === 0) return reply({ state: 'no-wallet' })
+      if (!(await grantedActiveId(origin))) return reply({ state: 'locked' })
       const session = await getSession()
       const activeId = await getActiveId()
       return reply({ state: session && session.walletId === activeId ? 'unlocked' : 'locked' })
     }
 
     case 'bdx_getNetwork': {
+      // Rate-limited; walletVersion (phishing-targeting granularity)
+      // only for granted origins. nettype/protocolVersion stay public — dapps
+      // need them to render a connect button at all.
+      if (!readAllowed(origin)) return fail(err(ERR.INTERNAL, 'rate limited — slow down'))
       const cached = (await sessionStore.get(CACHE_KEY))[CACHE_KEY]
       const height = Number(cached?.info?.blockchain_height ?? cached?.info?.scanned_block_height ?? 0) || 0
+      const granted = !!(await grantedActiveId(origin))
       return reply({
         nettype: nettype(), height,
         protocolVersion: PROTOCOL_VERSION,
-        walletVersion: chrome.runtime.getManifest().version
+        ...(granted ? { walletVersion: chrome.runtime.getManifest().version } : {})
       })
     }
 
@@ -537,6 +606,10 @@ async function handleMethod(
     }
 
     case 'bdx_connect': {
+      // Never let an impersonatable origin into the grant flow.
+      if (insecureOrigin(origin)) {
+        return fail(err(ERR.UNAUTHORIZED, 'insecure (http) origins cannot connect'))
+      }
       const wallets = await getWallets()
       const activeId = await getActiveId()
       if (!activeId || Object.keys(wallets).length === 0) {
@@ -547,9 +620,9 @@ async function handleMethod(
       if (await grantedActiveId(origin)) {
         return reply({ address: wallets[activeId].address, network: nettype() })
       }
-      // One pending approval per origin (spec §7.4).
-      for (const p of pendingLive.values()) {
-        if (p.origin === origin) return fail(err(ERR.INTERNAL, 'approval already pending'))
+      // One pending approval per origin (spec §7.4) — live + persisted.
+      if ((await pendingConflicts(origin)).origin) {
+        return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
       await queueApproval(origin, req.method, undefined, req.id, respond, tabId)
       return // settled later by DAPP_APPROVE / DAPP_REJECT / window close / TTL
@@ -562,10 +635,9 @@ async function handleMethod(
       if (!v.ok) return fail(err(ERR.INVALID_PARAMS, v.error))
       // Global single-flight: one send at a time across dapp + panel flows.
       if (await sendLockHeld()) return fail(err(ERR.INTERNAL, 'transaction already in progress'))
-      for (const p of pendingLive.values()) {
-        if (p.method === 'bdx_sendTransaction') return fail(err(ERR.INTERNAL, 'transaction already in progress'))
-        if (p.origin === origin) return fail(err(ERR.INTERNAL, 'approval already pending'))
-      }
+      const conflicts = await pendingConflicts(origin) // live + persisted
+      if (conflicts.send) return fail(err(ERR.INTERNAL, 'transaction already in progress'))
+      if (conflicts.origin) return fail(err(ERR.INTERNAL, 'approval already pending'))
       await queueApproval(origin, req.method, v.send as unknown as object, req.id, respond, tabId)
       return // settled by DAPP_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
     }
@@ -577,8 +649,8 @@ async function handleMethod(
       if (!v.ok) return fail(err(ERR.INVALID_PARAMS, v.error))
       const session = await getSession()
       if (!session || session.walletId !== activeId) return fail(err(ERR.LOCKED, 'wallet locked'))
-      for (const p of pendingLive.values()) {
-        if (p.origin === origin) return fail(err(ERR.INTERNAL, 'approval already pending'))
+      if ((await pendingConflicts(origin)).origin) { // live + persisted
+        return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
       await queueApproval(origin, req.method, { message: v.message }, req.id, respond, tabId)
       return // settled by DAPP_SIGN_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
@@ -684,6 +756,11 @@ export async function dappApprove(reqId: string): Promise<{ ok: true } | { ok: f
   if (!session || !activeId || session.walletId !== activeId) {
     return { ok: false, error: 'Unlock the wallet first' }
   }
+  if (insecureOrigin(meta.origin)) { // cannot be granted, ever
+    settlePending(reqId, { error: err(ERR.UNAUTHORIZED, 'insecure (http) origins cannot connect') })
+    await removePending(reqId)
+    return { ok: false, error: 'Insecure (http) sites cannot be connected' }
+  }
   const grants = await getGrants()
   grants[meta.origin] = { walletId: activeId, grantedAt: Date.now() }
   await setGrants(grants)
@@ -761,6 +838,18 @@ export async function dappRevokeOrigin(origin: string): Promise<{ ok: true }> {
 // ---- wiring -----------------------------------------------------------------
 
 export function initDappBridge(): void {
+  // Migration: drop any grant a pre-1.0.1 install issued to a
+  // plain-http origin — those origins are impersonatable on the network and
+  // can no longer be granted (or, post-manifest-change, even injected into).
+  ;(async () => {
+    const grants = await getGrants()
+    let changed = false
+    for (const origin of Object.keys(grants)) {
+      if (insecureOrigin(origin)) { delete grants[origin]; changed = true }
+    }
+    if (changed) await setGrants(grants)
+  })().catch(() => { /* storage hiccup — retried next SW start */ })
+
   chrome.runtime.onConnect.addListener(port => {
     if (port.name !== PORT_NAME) return
     // Origin comes from the browser, never from the page (spec §7.8).

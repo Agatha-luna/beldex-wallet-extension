@@ -1,0 +1,92 @@
+// Coverage for validateSignParams (src/background/dapp.ts).
+//
+// A bdx_signMessage message is rendered verbatim in the approval card; the
+// user must visually read EXACTLY the bytes they sign. ASCII control chars
+// were always rejected; the audit found that Unicode bidi controls and
+// invisible characters slipped through, letting a malicious dapp craft a
+// message whose rendered text differs from its logical content (e.g. RLO
+// reordering). These tests pin the extended rejection set.
+//
+// dapp.ts imports chrome-backed modules, so we extract just the
+// dependency-free validation block (MAX_SIGN_MESSAGE + DISALLOWED_SIGN_CHARS +
+// validateSignParams), transpile it with the repo's own typescript, and import
+// it via a data: URL — same single-source-of-truth pattern as
+// dapp-protocol.test.mjs.
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const src = readFileSync(join(here, '../src/background/dapp.ts'), 'utf8')
+
+const start = src.indexOf('const MAX_SIGN_MESSAGE')
+const end = src.indexOf('// One in-flight send')
+assert.ok(start !== -1 && end > start, 'validation block markers drifted in dapp.ts')
+const block = 'export ' + src.slice(start, end)
+
+const ts = await import('typescript').then(m => m.default ?? m)
+const js = ts.transpileModule(block, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 }
+}).outputText
+const { validateSignParams } = await import(
+  'data:text/javascript;base64,' + Buffer.from(js).toString('base64')
+)
+
+test('accepts ordinary messages, including non-ASCII text', () => {
+  for (const m of [
+    'hello world',
+    'beldex-asset-owner|v1|56e4bae7df73d7ce|1786950846|b0249c5b',
+    'prix: 12,50 € — café ☕',
+    'русский текст',
+    '日本語のメッセージ',
+    'مرحبا بالعالم',           // RTL text itself is fine — only CONTROLS are banned
+    'a'.repeat(512)
+  ]) {
+    const r = validateSignParams({ message: m })
+    assert.equal(r.ok, true, JSON.stringify(m))
+    assert.equal(r.message, m)
+  }
+})
+
+test('rejects non-strings, empty and oversized messages', () => {
+  for (const p of [undefined, null, {}, { message: 42 }, { message: '' }, { message: 'a'.repeat(513) }]) {
+    assert.equal(validateSignParams(p).ok, false, JSON.stringify(p))
+  }
+})
+
+test('rejects ASCII control characters (pre-audit behavior preserved)', () => {
+  for (const m of ['line1\nline2', 'tab\there', 'esc\x1b[2Jwipe', 'nul\x00', 'del\x7f']) {
+    assert.equal(validateSignParams({ message: m }).ok, false, JSON.stringify(m))
+  }
+})
+
+test('rejects bidi direction controls', () => {
+  const bidi = [
+    '‪', '‫', '‬', '‭', '‮', // LRE RLE PDF LRO RLO
+    '⁦', '⁧', '⁨', '⁩',           // LRI RLI FSI PDI
+    '‎', '‏'                                // LRM RLM
+  ]
+  for (const c of bidi) {
+    assert.equal(validateSignParams({ message: `pay 1 BDX ${c}to attacker` }).ok, false,
+      'U+' + c.codePointAt(0).toString(16))
+  }
+  // The classic RLO spoof: rendered text reads reversed.
+  assert.equal(validateSignParams({ message: 'transfer to ‮rekcatta' }).ok, false)
+})
+
+test('rejects invisible characters', () => {
+  const invisible = [
+    '­',                               // soft hyphen
+    '​', '‌', '‍',           // ZWSP ZWNJ ZWJ
+    ' ', ' ',                     // line / paragraph separator
+    '⁠', '⁡', '⁢', '⁣', '⁤', // word joiner + invisible operators
+    '﻿'                                // ZWNBSP / BOM
+  ]
+  for (const c of invisible) {
+    assert.equal(validateSignParams({ message: `visible${c}hidden` }).ok, false,
+      'U+' + c.codePointAt(0).toString(16))
+  }
+})

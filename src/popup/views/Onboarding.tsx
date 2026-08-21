@@ -29,6 +29,14 @@ function StrengthHint({ password }: { password: string }) {
         <div style={{ height: '100%', width: `${s.pct}%`, background: s.color, transition: 'width 0.2s, background 0.2s' }} />
       </div>
       <span style={{ fontSize: 10, color: s.color }}>{s.label}</span>
+      {s.label !== 'strong' && (
+        // The vault can be brute-forced OFFLINE by anything that can
+        // read the browser profile — password strength is the real defense.
+        <div style={{ fontSize: 10, color: 'var(--dim, #888)', marginTop: 2 }}>
+          This password protects your funds even if your computer's files are
+          stolen — a long passphrase (e.g. 4+ random words) is much stronger.
+        </div>
+      )}
     </div>
   )
 }
