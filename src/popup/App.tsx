@@ -6,6 +6,7 @@ import { Dashboard } from './views/Dashboard'
 import { ConnectApprovalCard } from './views/ConnectApprovalCard'
 import { SendApprovalCard, SendReqParams } from './views/SendApprovalCard'
 import { SignApprovalCard, SignReqParams } from './views/SignApprovalCard'
+import { AuthSignApprovalCard, AuthSignReqParams } from './views/AuthSignApprovalCard'
 
 type PendingReq = { reqId: string } & PendingApproval
 
@@ -94,6 +95,15 @@ export function App() {
             reqId={pendingReq.reqId}
             origin={pendingReq.origin}
             params={pendingReq.params as unknown as SignReqParams}
+            walletName={pendingReq.walletName}
+            expect={expect}
+            onDone={done}
+          />
+        ) : pendingReq.method === 'bdx_signAuthChallenge' ? (
+          <AuthSignApprovalCard
+            reqId={pendingReq.reqId}
+            origin={pendingReq.origin}
+            params={pendingReq.params as unknown as AuthSignReqParams}
             walletName={pendingReq.walletName}
             expect={expect}
             onDone={done}

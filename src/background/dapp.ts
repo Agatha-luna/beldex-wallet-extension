@@ -403,6 +403,111 @@ export function validateSignParams(params: unknown): { ok: true; message: string
   return { ok: true, message: p.message }
 }
 
+// ---- bdx_signAuthChallenge (wallet-composed sign-in proof) -------------------
+//
+// The wallet — not the page — composes the statement, inserting the origin it
+// observed from the content-script sender. This makes the proof audience-bound
+// by the wallet: a malicious page cannot get the user to sign a statement
+// naming a domain other than the one actually asking. The page supplies only
+// the server-issued nonce (and an optional requestId / expiry). See the
+// companion bdx-web3js `buildAuthChallenge()` — the format below must byte-match.
+
+const AUTH_PREFIX = 'beldex-auth-v1'
+const NONCE_RE = /^[A-Za-z0-9._-]{8,128}$/
+const REQUEST_ID_RE = /^[A-Za-z0-9._-]{1,64}$/
+const EXPIRES_MIN_MS = 60_000
+const EXPIRES_MAX_MS = 3_600_000
+const EXPIRES_DEFAULT_MS = 300_000
+
+export interface AuthChallengeParams {
+  nonce: string
+  requestId?: string
+  expiresInMs: number
+}
+
+/** Validate the PAGE-supplied params for bdx_signAuthChallenge. Everything
+ *  security-relevant (domain/uri/address/network/iat/exp) is wallet-derived and
+ *  NOT taken from here; the page may only influence nonce, requestId, and the
+ *  expiry within its clamp. */
+export function validateAuthChallengeParams(
+  params: unknown
+): { ok: true; value: AuthChallengeParams } | { ok: false; error: string } {
+  const p = (params ?? {}) as Record<string, unknown>
+  const allowed = new Set(['nonce', 'requestId', 'expiresInMs'])
+  for (const k of Object.keys(p)) {
+    if (!allowed.has(k)) return { ok: false, error: `unexpected field "${k}"` }
+  }
+  if (typeof p.nonce !== 'string' || !NONCE_RE.test(p.nonce)) {
+    return { ok: false, error: 'invalid field "nonce" (8–128 chars of [A-Za-z0-9._-])' }
+  }
+  let requestId: string | undefined
+  if (p.requestId !== undefined) {
+    if (typeof p.requestId !== 'string' || !REQUEST_ID_RE.test(p.requestId)) {
+      return { ok: false, error: 'invalid field "requestId" (1–64 chars of [A-Za-z0-9._-])' }
+    }
+    requestId = p.requestId
+  }
+  let expiresInMs = EXPIRES_DEFAULT_MS
+  if (p.expiresInMs !== undefined) {
+    if (typeof p.expiresInMs !== 'number' || !Number.isInteger(p.expiresInMs)
+      || p.expiresInMs < EXPIRES_MIN_MS || p.expiresInMs > EXPIRES_MAX_MS) {
+      return { ok: false, error: `invalid field "expiresInMs" (integer ${EXPIRES_MIN_MS}–${EXPIRES_MAX_MS})` }
+    }
+    expiresInMs = p.expiresInMs
+  }
+  return { ok: true, value: { nonce: p.nonce, expiresInMs, ...(requestId !== undefined ? { requestId } : {}) } }
+}
+
+export interface AuthChallengeFields {
+  domain: string; uri: string; address: string; network: string
+  nonce: string; iat: number; exp: number; requestId?: string
+}
+
+/** Compose the exact single-line statement to be signed. Byte-identical to the
+ *  SDK's buildAuthChallenge(): space-separated `key=value`, `rid` only when a
+ *  requestId is present. */
+export function buildAuthChallenge(f: AuthChallengeFields): string {
+  let s = `${AUTH_PREFIX} domain=${f.domain} uri=${f.uri} address=${f.address}`
+    + ` network=${f.network} nonce=${f.nonce} iat=${f.iat} exp=${f.exp}`
+  if (f.requestId !== undefined) s += ` rid=${f.requestId}`
+  return s
+}
+
+/** Derive the wallet-controlled fields and the statement. Returns an error if
+ *  any field value contains whitespace/control chars or the statement exceeds
+ *  the 512-char cap the approval card can fully display. */
+function composeAuthChallenge(
+  domain: string, senderUrl: string | undefined, address: string, network: string,
+  v: AuthChallengeParams
+): { ok: true; message: string; fields: AuthChallengeFields } | { ok: false; error: string } {
+  let uri = domain + '/'
+  if (senderUrl) {
+    try {
+      const u = new URL(senderUrl)
+      if (u.origin === domain) uri = domain + u.pathname
+    } catch { /* fall back to domain + / */ }
+  }
+  const iat = Date.now()
+  const fields: AuthChallengeFields = {
+    domain, uri, address, network, nonce: v.nonce, iat, exp: iat + v.expiresInMs,
+    ...(v.requestId !== undefined ? { requestId: v.requestId } : {})
+  }
+  // No field value may contain whitespace or control/invisible chars — those
+  // would break the single-line format or let the rendered card diverge from
+  // the signed bytes.
+  for (const val of [fields.domain, fields.uri, fields.address, fields.network,
+    fields.nonce, ...(fields.requestId !== undefined ? [fields.requestId] : [])]) {
+    if (/\s/.test(val) || DISALLOWED_SIGN_CHARS.test(val)) {
+      return { ok: false, error: 'wallet-derived field contains invalid characters' }
+    }
+  }
+  const message = buildAuthChallenge(fields)
+  if (message.length > MAX_SIGN_MESSAGE) {
+    return { ok: false, error: `challenge too long (max ${MAX_SIGN_MESSAGE} characters)` }
+  }
+  return { ok: true, message, fields }
+}
+
 // One in-flight send per wallet, shared by the panel's own send flow and dapp
 // sends (two concurrent constructions could pick the same outputs → double
 // spend). Held in storage.session with a stale-out so a crashed signer can't
@@ -574,7 +679,8 @@ async function handleMethod(
   origin: string,
   req: DappPortRequest,
   respond: (msg: DappPortMessage) => void,
-  tabId?: number
+  tabId?: number,
+  senderUrl?: string
 ): Promise<void> {
   const reply = (result: unknown) => respond({ id: req.id, result })
   const fail = (e: { code: number; message: string }) => respond({ id: req.id, error: e })
@@ -707,6 +813,28 @@ async function handleMethod(
       }
       await queueApproval(origin, req.method, { message: v.message }, req.id, respond, tabId, activeId, session.generation)
       return // settled by DAPP_SIGN_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
+    }
+
+    case 'bdx_signAuthChallenge': {
+      // Same preconditions as bdx_signMessage. The difference is the wallet
+      // composes the statement from the origin IT observed — the page cannot
+      // name a different domain in the signed bytes.
+      const activeId = await grantedActiveId(origin)
+      if (!activeId) return fail(err(ERR.UNAUTHORIZED, 'origin not connected'))
+      const v = validateAuthChallengeParams(req.params)
+      if (!v.ok) return fail(err(ERR.INVALID_PARAMS, v.error))
+      const session = await getSession()
+      if (!session || session.walletId !== activeId) return fail(err(ERR.LOCKED, 'wallet locked'))
+      const composed = composeAuthChallenge(origin, senderUrl, session.secrets.address, nettype(), v.value)
+      if (!composed.ok) return fail(err(ERR.INVALID_PARAMS, composed.error))
+      if ((await pendingConflicts(origin)).origin) { // live + persisted
+        return fail(err(ERR.INTERNAL, 'approval already pending'))
+      }
+      await queueApproval(
+        origin, req.method, { message: composed.message, fields: composed.fields },
+        req.id, respond, tabId, activeId, session.generation
+      )
+      return // settled by DAPP_AUTH_SIGN_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
     }
 
     case 'bdx_verifyMessage': {
@@ -880,6 +1008,33 @@ export async function dappSignComplete(
   return { ok: true }
 }
 
+/** Auth-challenge signed in the approval surface. The reply carries the exact
+ *  signed `message` (the wallet-composed statement) alongside the signature so
+ *  the dapp/server verifies against bytes it can re-derive. */
+export async function dappAuthSignComplete(
+  reqId: string, result: { message: string; signature: string; address: string }
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const all = (await sessionStore.get(PENDING_KEY))[PENDING_KEY] ?? {}
+  const meta: PendingMeta | undefined = all[reqId]
+  if (!meta) return { ok: false, error: 'Request no longer pending' }
+  // Defense in depth: the returned message MUST be the wallet-composed
+  // statement recorded at queue time, never anything the surface substituted.
+  const expected = (meta.params as { message?: unknown } | undefined)?.message
+  if (typeof expected !== 'string' || String(result.message) !== expected) {
+    return { ok: false, error: 'signed message does not match the approved challenge' }
+  }
+  settlePending(reqId, {
+    result: {
+      message: expected,
+      signature: String(result.signature),
+      address: String(result.address)
+    }
+  })
+  await removePending(reqId)
+  notifyPanels()
+  return { ok: true }
+}
+
 /** Send flow failed. The wire error is SANITIZED (spec §6) — the detailed
  *  reason stays in the wallet UI, never goes to the page. */
 export async function dappFail(reqId: string): Promise<{ ok: true }> {
@@ -938,7 +1093,7 @@ export function initDappBridge(): void {
       const req = validatePortRequest(raw)
       if (!req) return
       const respond = (msg: DappPortMessage) => { try { port.postMessage(msg) } catch { /* gone */ } }
-      handleMethod(origin, req, respond, port.sender?.tab?.id).catch(() =>
+      handleMethod(origin, req, respond, port.sender?.tab?.id, port.sender?.url).catch(() =>
         respond({ id: req.id, error: err(ERR.INTERNAL, 'internal error') })
       )
     })

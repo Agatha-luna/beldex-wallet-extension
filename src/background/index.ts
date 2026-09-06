@@ -21,7 +21,7 @@ import {
   dappComplete, dappSignComplete, dappFail, dappSendLockAcquire, dappSendLockRelease,
   dappListOrigins, dappRevokeOrigin, dappActiveTabSite, dappNotifyLocked, dappNotifyUnlocked,
   dappNotifyWalletSwitched, dappNotifyBalanceFromInfo, dappCleanupWallet,
-  dappInvalidateOnSessionEnd, dappInvalidateForWallet
+  dappInvalidateOnSessionEnd, dappInvalidateForWallet, dappAuthSignComplete
 } from './dapp'
 
 // Open the panel when the toolbar icon is clicked (Chrome side panel / Firefox sidebar).
@@ -464,6 +464,11 @@ async function handle(req: BgRequest): Promise<BgResponse> {
 
     case 'DAPP_SIGN_COMPLETE': {
       const r = await dappSignComplete(req.reqId, req.result)
+      return r.ok ? { ok: true } : { ok: false, error: r.error }
+    }
+
+    case 'DAPP_AUTH_SIGN_COMPLETE': {
+      const r = await dappAuthSignComplete(req.reqId, req.result)
       return r.ok ? { ok: true } : { ok: false, error: r.error }
     }
 

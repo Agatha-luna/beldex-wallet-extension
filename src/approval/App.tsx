@@ -12,6 +12,7 @@ import { sendToBackground, PendingApproval } from '../lib/messages'
 import { ConnectApprovalCard } from '../popup/views/ConnectApprovalCard'
 import { SendApprovalCard, SendReqParams } from '../popup/views/SendApprovalCard'
 import { SignApprovalCard, SignReqParams } from '../popup/views/SignApprovalCard'
+import { AuthSignApprovalCard, AuthSignReqParams } from '../popup/views/AuthSignApprovalCard'
 
 type Phase = 'loading' | 'expired' | 'unlock' | 'confirm'
 
@@ -98,6 +99,7 @@ export function ApprovalApp() {
         <>
           <h2>{pending.method === 'bdx_sendTransaction' ? 'Transaction Request'
             : pending.method === 'bdx_signMessage' ? 'Signature Request'
+            : pending.method === 'bdx_signAuthChallenge' ? 'Sign-in Request'
             : 'Connection Request'}</h2>
           <div className="origin">{pending.origin}</div>
           <div className="card">
@@ -131,6 +133,15 @@ export function ApprovalApp() {
             reqId={reqId}
             origin={pending.origin}
             params={pending.params as unknown as SignReqParams}
+            walletName={pending.walletName}
+            expect={{ walletId: pending.walletId, generation: pending.sessionGeneration }}
+            onDone={() => window.close()}
+          />
+        ) : pending.method === 'bdx_signAuthChallenge' ? (
+          <AuthSignApprovalCard
+            reqId={reqId}
+            origin={pending.origin}
+            params={pending.params as unknown as AuthSignReqParams}
             walletName={pending.walletName}
             expect={{ walletId: pending.walletId, generation: pending.sessionGeneration }}
             onDone={() => window.close()}
