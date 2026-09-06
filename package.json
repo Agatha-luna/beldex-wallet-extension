@@ -7,7 +7,7 @@
     "build": "npm run build:chrome && npm run build:firefox",
     "build:chrome": "webpack --mode=production",
     "build:firefox": "webpack --mode=production --env firefox",
-    "package": "npm run build && bash scripts/package.sh",
+    "package": "bash scripts/package.sh",
     "build:testnet": "npm run build:chrome:testnet && npm run build:firefox:testnet",
     "build:chrome:testnet": "webpack --mode=production --env network=testnet",
     "build:firefox:testnet": "webpack --mode=production --env firefox --env network=testnet",
