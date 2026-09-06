@@ -486,11 +486,11 @@ async function handle(req: BgRequest): Promise<BgResponse> {
 
     case 'SEND_LOCK_ACQUIRE': {
       const r = await dappSendLockAcquire()
-      return r.ok ? { ok: true } : { ok: false, error: r.error }
+      return r.ok ? { ok: true, lockOwner: r.owner } : { ok: false, error: r.error }
     }
 
     case 'SEND_LOCK_RELEASE':
-      return dappSendLockRelease()
+      return dappSendLockRelease(req.owner)
 
     case 'DAPP_LIST_ORIGINS':
       return { ok: true, origins: await dappListOrigins() }

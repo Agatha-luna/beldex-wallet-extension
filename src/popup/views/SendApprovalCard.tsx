@@ -127,6 +127,7 @@ export function SendApprovalCard({ reqId, origin, params, walletName, expect, on
     // Global single-flight send lock (shared with the panel's own send flow).
     const lock = await sendToBackground({ type: 'SEND_LOCK_ACQUIRE' })
     if (!lock.ok) { setError(lock.error); setPhase('review'); return }
+    const lockOwner = lock.lockOwner // present this token to release only our lock
     // Atomic PENDING -> EXECUTING BEFORE any construction (external audit):
     // this cancels the review timer and mints the execution token, so the
     // transaction can no longer be terminated by an approval timeout while it
@@ -186,7 +187,7 @@ export function SendApprovalCard({ reqId, origin, params, walletName, expect, on
       }).catch(() => {})
       setPhase('failed')
     } finally {
-      await sendToBackground({ type: 'SEND_LOCK_RELEASE' }).catch(() => {})
+      await sendToBackground({ type: 'SEND_LOCK_RELEASE', owner: lockOwner }).catch(() => {})
     }
   }
 

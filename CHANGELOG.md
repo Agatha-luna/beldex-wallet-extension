@@ -20,6 +20,12 @@
 - A still-pending send / sign / sign-in approval is now cancelled when its
   page's message channel disconnects (connect approvals stay, being recoverable
   via the persisted grant).
+- **Serialized security-critical state updates** — the send lock, pending-approval
+  admission, and grant-map updates now run under in-worker mutexes so two
+  interleaved message handlers can't both pass a check-then-write. The send lock
+  carries an owner token (a stale holder's release can't delete a newer lock),
+  and grant edits are per-mutation read-modify-writes so a concurrent
+  revoke/approve can't lose an update or resurrect a removed origin.
 
 ## 1.1.0
 

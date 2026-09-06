@@ -180,6 +180,37 @@ async function setGrants(g: GrantMap): Promise<void> {
   await chrome.storage.local.set({ [GRANTS_KEY]: g })
 }
 
+// ---- serialization (external audit) ----------------------------------------
+//
+// JavaScript is single-threaded but NOT atomic across `await`: the service
+// worker can dispatch another Port/runtime message while a handler is suspended
+// mid check-then-write. chrome.storage offers no compare-and-set, so two
+// interleaved handlers could both pass a "not held / no conflict" check, or a
+// whole-map grant write derived from a stale snapshot could clobber a
+// concurrent one (lost revocation / resurrected origin). These named mutexes
+// serialize each critical section within this worker; persisted state + owner
+// tokens (below) handle cross-restart cases.
+const mutexTails = new Map<string, Promise<unknown>>()
+function withLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const prev = mutexTails.get(name) ?? Promise.resolve()
+  // Run fn after prev settles, regardless of whether prev resolved or rejected.
+  const run = prev.then(fn, fn)
+  // The stored tail never rejects, so one failing section can't wedge the queue.
+  mutexTails.set(name, run.then(() => {}, () => {}))
+  return run
+}
+
+/** Serialized read-modify-write of the grant map (external audit): all grant
+ *  mutations must go through here so a concurrent revoke/approve/cleanup can't
+ *  lose an update or resurrect a removed origin. `mutate` edits the map in
+ *  place and returns whether anything changed. */
+async function updateGrants(mutate: (g: GrantMap) => boolean): Promise<void> {
+  await withLock('grants', async () => {
+    const g = await getGrants()
+    if (mutate(g)) await setGrants(g)
+  })
+}
+
 function nettype(): 'mainnet' | 'testnet' {
   return CONFIG.NETWORK
 }
@@ -286,15 +317,15 @@ export async function dappNotifyBalanceFromInfo(info: Record<string, unknown>): 
 /** A wallet was deleted: drop its grants, void its approvals, tell those origins. */
 export async function dappCleanupWallet(walletId: string): Promise<void> {
   await rejectPendingWhere(m => m.walletId === walletId, 'wallet removed — request cancelled')
-  const grants = await getGrants()
-  let changed = false
-  for (const [origin, g] of Object.entries(grants)) {
-    if (g.walletId !== walletId) continue
-    delete grants[origin]
-    changed = true
-    sendToOrigin(origin, 'disconnect', {})
-  }
-  if (changed) await setGrants(grants)
+  const dropped: string[] = []
+  await updateGrants(g => {
+    for (const [origin, grant] of Object.entries(g)) {
+      if (grant.walletId !== walletId) continue
+      delete g[origin]; dropped.push(origin)
+    }
+    return dropped.length > 0
+  })
+  for (const origin of dropped) sendToOrigin(origin, 'disconnect', {})
 }
 
 // ---- pending-approval invalidation (external audit: immutable context) ------
@@ -617,19 +648,47 @@ function composeAuthChallenge(
 const SEND_LOCK_KEY = 'send_lock'
 const SEND_LOCK_STALE_MS = 3 * 60_000
 
+// The lock lives in storage.session (survives SW restart, cleared on browser
+// exit) with a stale-out so a crashed signer can't wedge the wallet, PLUS an
+// owner token so a stale prior holder's release can't delete a newer holder's
+// lock (external audit). All mutations run under withLock('send'), which
+// serializes the check-then-write within this worker, so two interleaved
+// acquires cannot both pass the not-held check.
+
+interface SendLockRecord { owner: string; at: number }
+
+/** The current NON-stale lock record, or null if free/stale. */
+async function sendLockRecord(): Promise<SendLockRecord | null> {
+  const l = (await sessionStore.get(SEND_LOCK_KEY))[SEND_LOCK_KEY] as SendLockRecord | undefined
+  if (!l || Date.now() - (l.at ?? 0) >= SEND_LOCK_STALE_MS) return null
+  return l
+}
+
 export async function sendLockHeld(): Promise<boolean> {
-  const l = (await sessionStore.get(SEND_LOCK_KEY))[SEND_LOCK_KEY]
-  return !!l && Date.now() - (l.at ?? 0) < SEND_LOCK_STALE_MS
+  return (await sendLockRecord()) !== null
 }
 
-export async function dappSendLockAcquire(): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (await sendLockHeld()) return { ok: false, error: 'A transaction is already in progress' }
-  await sessionStore.set({ [SEND_LOCK_KEY]: { at: Date.now() } })
-  return { ok: true }
+/** Acquire the global single-flight send lock, returning an owner token the
+ *  caller must present to release it. Serialized so concurrent acquires can't
+ *  both succeed; a stale lock is replaceable. */
+export async function dappSendLockAcquire(): Promise<{ ok: true; owner: string } | { ok: false; error: string }> {
+  return withLock('send', async () => {
+    if (await sendLockRecord()) return { ok: false as const, error: 'A transaction is already in progress' }
+    const owner = crypto.randomUUID()
+    await sessionStore.set({ [SEND_LOCK_KEY]: { owner, at: Date.now() } satisfies SendLockRecord })
+    return { ok: true as const, owner }
+  })
 }
 
-export async function dappSendLockRelease(): Promise<{ ok: true }> {
-  await sessionStore.remove(SEND_LOCK_KEY)
+/** Release the send lock — only the matching owner may, so a stale prior holder
+ *  whose lock was already replaced is a no-op and never deletes the new lock.
+ *  A tokenless (legacy) call only clears a tokenless record. */
+export async function dappSendLockRelease(owner?: string): Promise<{ ok: true }> {
+  await withLock('send', async () => {
+    const rec = (await sessionStore.get(SEND_LOCK_KEY))[SEND_LOCK_KEY] as SendLockRecord | undefined
+    if (!rec) return
+    if (owner ? rec.owner === owner : !rec.owner) await sessionStore.remove(SEND_LOCK_KEY)
+  })
   return { ok: true }
 }
 
@@ -851,12 +910,12 @@ async function handleMethod(
     }
 
     case 'bdx_disconnect': {
-      const grants = await getGrants()
-      if (grants[origin]) {
-        delete grants[origin]
-        await setGrants(grants)
-        sendToOrigin(origin, 'disconnect', {})
-      }
+      let removed = false
+      await updateGrants(g => {
+        if (!g[origin]) return false
+        delete g[origin]; removed = true; return true
+      })
+      if (removed) sendToOrigin(origin, 'disconnect', {})
       return reply({})
     }
 
@@ -875,13 +934,16 @@ async function handleMethod(
       if (await grantedActiveId(origin)) {
         return reply({ address: wallets[activeId].address, network: nettype() })
       }
-      // One pending approval per origin (spec §7.4) — live + persisted.
-      if ((await pendingConflicts(origin)).origin) {
-        return fail(err(ERR.INTERNAL, 'approval already pending'))
+      // One pending approval per origin (spec §7.4), admitted atomically.
+      // Generation is null: connect may legitimately be approved after the
+      // surface's own unlock. Bound to the wallet being displayed.
+      {
+        const a = await admitApproval({
+          origin, method: req.method, params: undefined, pageReqId: req.id,
+          respond, tabId, walletId: activeId, sessionGeneration: null
+        })
+        if (!a.ok) return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
-      // Bind the approval to the wallet being displayed. Generation is null:
-      // connect may legitimately be approved after the surface's own unlock.
-      await queueApproval(origin, req.method, undefined, req.id, respond, tabId, activeId, null)
       return // settled later by DAPP_APPROVE / DAPP_REJECT / window close / TTL
     }
 
@@ -906,13 +968,20 @@ async function handleMethod(
       }
       // Global single-flight: one send at a time across dapp + panel flows.
       if (await sendLockHeld()) return fail(err(ERR.INTERNAL, 'transaction already in progress'))
-      const conflicts = await pendingConflicts(origin) // live + persisted
-      if (conflicts.send) return fail(err(ERR.INTERNAL, 'transaction already in progress'))
-      if (conflicts.origin) return fail(err(ERR.INTERNAL, 'approval already pending'))
       {
         const session = await getSession()
         const generation = session && session.walletId === activeId ? session.generation : null
-        await queueApproval(origin, req.method, v.send as unknown as object, req.id, respond, tabId, activeId, generation, port)
+        // Atomic admission: the send-conflict + origin-conflict check and the
+        // queue-write run under one mutex so two sends can't both be admitted.
+        const a = await admitApproval({
+          origin, method: req.method, params: v.send as unknown as object, pageReqId: req.id,
+          respond, tabId, walletId: activeId, sessionGeneration: generation, owner: port,
+          requireNoSend: true
+        })
+        if (!a.ok) {
+          return fail(err(ERR.INTERNAL,
+            a.kind === 'send' ? 'transaction already in progress' : 'approval already pending'))
+        }
       }
       return // settled by DAPP_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
     }
@@ -941,10 +1010,13 @@ async function handleMethod(
       if (!v.ok) return fail(err(ERR.INVALID_PARAMS, v.error))
       const session = await getSession()
       if (!session || session.walletId !== activeId) return fail(err(ERR.LOCKED, 'wallet locked'))
-      if ((await pendingConflicts(origin)).origin) { // live + persisted
-        return fail(err(ERR.INTERNAL, 'approval already pending'))
+      {
+        const a = await admitApproval({
+          origin, method: req.method, params: { message: v.message }, pageReqId: req.id,
+          respond, tabId, walletId: activeId, sessionGeneration: session.generation, owner: port
+        })
+        if (!a.ok) return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
-      await queueApproval(origin, req.method, { message: v.message }, req.id, respond, tabId, activeId, session.generation, port)
       return // settled by DAPP_SIGN_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
     }
 
@@ -960,13 +1032,14 @@ async function handleMethod(
       if (!session || session.walletId !== activeId) return fail(err(ERR.LOCKED, 'wallet locked'))
       const composed = composeAuthChallenge(origin, senderUrl, session.secrets.address, nettype(), v.value)
       if (!composed.ok) return fail(err(ERR.INVALID_PARAMS, composed.error))
-      if ((await pendingConflicts(origin)).origin) { // live + persisted
-        return fail(err(ERR.INTERNAL, 'approval already pending'))
+      {
+        const a = await admitApproval({
+          origin, method: req.method, params: { message: composed.message, fields: composed.fields },
+          pageReqId: req.id, respond, tabId, walletId: activeId,
+          sessionGeneration: session.generation, owner: port
+        })
+        if (!a.ok) return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
-      await queueApproval(
-        origin, req.method, { message: composed.message, fields: composed.fields },
-        req.id, respond, tabId, activeId, session.generation, port
-      )
       return // settled by DAPP_AUTH_SIGN_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
     }
 
@@ -1022,6 +1095,28 @@ async function queueApproval(
   pendingLive.set(reqId, { ...meta, pageReqId, respond, timer, ...(owner ? { owner } : {}) })
   await persistPending(reqId, meta)
   await openApproval(reqId, tabId)
+}
+
+/** Serialized "check duplicate-pending conflicts, then queue" (external audit):
+ *  running the conflict check and the queue-write under one mutex stops two
+ *  interleaved requests from both passing the one-per-origin / one-send check
+ *  and queuing duplicate approvals. Returns which conflict blocked admission. */
+async function admitApproval(args: {
+  origin: string; method: DappMethod; params: object | undefined; pageReqId: string
+  respond: (msg: DappPortMessage) => void; tabId?: number
+  walletId: string; sessionGeneration: string | null; owner?: chrome.runtime.Port
+  requireNoSend?: boolean
+}): Promise<{ ok: true } | { ok: false; kind: 'send' | 'origin' }> {
+  return withLock('pending', async () => {
+    const c = await pendingConflicts(args.origin)
+    if (args.requireNoSend && c.send) return { ok: false as const, kind: 'send' as const }
+    if (c.origin) return { ok: false as const, kind: 'origin' as const }
+    await queueApproval(
+      args.origin, args.method, args.params, args.pageReqId, args.respond,
+      args.tabId, args.walletId, args.sessionGeneration, args.owner
+    )
+    return { ok: true as const }
+  })
 }
 
 // ---- internal messages from the approval UI / Settings ----------------------
@@ -1098,9 +1193,7 @@ export async function dappApprove(reqId: string): Promise<{ ok: true } | { ok: f
     await removePending(reqId)
     return { ok: false, error: 'Insecure (http) sites cannot be connected' }
   }
-  const grants = await getGrants()
-  grants[meta.origin] = { walletId: activeId, grantedAt: Date.now() }
-  await setGrants(grants)
+  await updateGrants(g => { g[meta.origin] = { walletId: activeId, grantedAt: Date.now() }; return true })
   const result = { address: session.secrets.address, network: nettype() }
   settlePending(reqId, { result })
   await removePending(reqId)
@@ -1264,12 +1357,12 @@ export async function dappListOrigins(): Promise<Array<{ origin: string; granted
 }
 
 export async function dappRevokeOrigin(origin: string): Promise<{ ok: true }> {
-  const grants = await getGrants()
-  if (grants[origin]) {
-    delete grants[origin]
-    await setGrants(grants)
-    sendToOrigin(origin, 'disconnect', {})
-  }
+  let removed = false
+  await updateGrants(g => {
+    if (!g[origin]) return false
+    delete g[origin]; removed = true; return true
+  })
+  if (removed) sendToOrigin(origin, 'disconnect', {})
   return { ok: true }
 }
 
@@ -1279,14 +1372,13 @@ export function initDappBridge(): void {
   // Migration: drop any grant a pre-1.0.1 install issued to a
   // plain-http origin — those origins are impersonatable on the network and
   // can no longer be granted (or, post-manifest-change, even injected into).
-  ;(async () => {
-    const grants = await getGrants()
+  updateGrants(g => {
     let changed = false
-    for (const origin of Object.keys(grants)) {
-      if (insecureOrigin(origin)) { delete grants[origin]; changed = true }
+    for (const origin of Object.keys(g)) {
+      if (insecureOrigin(origin)) { delete g[origin]; changed = true }
     }
-    if (changed) await setGrants(grants)
-  })().catch(() => { /* storage hiccup — retried next SW start */ })
+    return changed
+  }).catch(() => { /* storage hiccup — retried next SW start */ })
 
   chrome.runtime.onConnect.addListener(port => {
     if (port.name !== PORT_NAME) return

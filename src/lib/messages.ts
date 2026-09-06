@@ -45,7 +45,7 @@ export type BgRequest =
   | { type: 'DAPP_AUTH_SIGN_COMPLETE'; reqId: string; result: { message: string; signature: string; address: string } }
   | { type: 'DAPP_FAIL'; reqId: string; operationId?: string; executionToken?: string }
   | { type: 'SEND_LOCK_ACQUIRE' } // global one-send-at-a-time (panel + dapp)
-  | { type: 'SEND_LOCK_RELEASE' }
+  | { type: 'SEND_LOCK_RELEASE'; owner?: string } // only the matching owner releases
   | { type: 'DAPP_LIST_ORIGINS' }
   | { type: 'DAPP_ACTIVE_SITE' } // site in the user's active tab + connection status
   | { type: 'DAPP_REVOKE_ORIGIN'; origin: string }
@@ -74,6 +74,8 @@ export type BgResponse =
       // DAPP_BEGIN_SEND: the atomic execution grant handed to the approval card.
       executionToken?: string
       operationId?: string
+      // SEND_LOCK_ACQUIRE: owner token required to release the lock.
+      lockOwner?: string
       // dapp bridge. Wallet fields describe the wallet RECORDED when the
       // request was queued (immutable approval context) — approval surfaces
       // must render and bind against these, not the currently active wallet.

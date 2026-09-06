@@ -26,7 +26,9 @@ const CANDIDATES = ['dist/background.js', 'dist-testnet/background.js',
 const bundle = CANDIDATES.map(p => join(here, '..', p)).find(existsSync)
 
 const PAGE_REQ_ID = 'page-generated-id-1'
-const ORIGIN = 'http://site.test'
+// https: an http origin would be purged by the startup insecure-origin grant
+// migration (audit M2), which is unrelated to the reply plumbing under test.
+const ORIGIN = 'https://site.test'
 const SECRETS = {
   address: 'bx9testaddress', pubSpendKey: 'a'.repeat(64), secSpendKey: 'b'.repeat(64),
   pubViewKey: 'c'.repeat(64), secViewKey: 'd'.repeat(64), mnemonic: 'x', seed: 'y'

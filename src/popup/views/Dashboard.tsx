@@ -312,6 +312,7 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
       setSendError(lock.error); setSendPhase('error'); setSending(false)
       return
     }
+    const lockOwner = lock.lockOwner // release only our own lock
     try {
       const s = await sendToBackground({ type: 'GET_SECRETS' })
       if (!s.ok || !s.secrets) { onLocked(); return }
@@ -339,7 +340,7 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
       setSendPhase('error')
     } finally {
       setSending(false)
-      await sendToBackground({ type: 'SEND_LOCK_RELEASE' }).catch(() => {})
+      await sendToBackground({ type: 'SEND_LOCK_RELEASE', owner: lockOwner }).catch(() => {})
     }
   }
 
