@@ -8,24 +8,20 @@
 // visible.
 
 import { useEffect, useState } from 'react'
-import { sendToBackground } from '../lib/messages'
+import { sendToBackground, PendingApproval } from '../lib/messages'
 import { ConnectApprovalCard } from '../popup/views/ConnectApprovalCard'
 import { SendApprovalCard, SendReqParams } from '../popup/views/SendApprovalCard'
 import { SignApprovalCard, SignReqParams } from '../popup/views/SignApprovalCard'
 
 type Phase = 'loading' | 'expired' | 'unlock' | 'confirm'
 
-interface Pending { origin: string; method: string; params?: object }
-
 export function ApprovalApp() {
   const reqId = new URLSearchParams(location.search).get('reqId') ?? ''
 
   const [phase, setPhase] = useState<Phase>('loading')
-  const [pending, setPending] = useState<Pending | null>(null)
+  const [pending, setPending] = useState<PendingApproval | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [walletName, setWalletName] = useState('')
-  const [address, setAddress] = useState('')
   const [password, setPassword] = useState('')
 
   const load = async () => {
@@ -35,16 +31,27 @@ export function ApprovalApp() {
       setPhase('expired')
       return
     }
+    // Wallet identity is rendered from the request's IMMUTABLE record (the
+    // wallet shown when it was queued) — never re-read from current state,
+    // which can change under this window (external audit). GET_STATE is used
+    // only for locked/unlocked; if the ACTIVE wallet is no longer the
+    // request's wallet, the request is void (the background also enforces
+    // this at approve/secrets time — this just fails it early and clearly).
     setPending(p.pending)
     const state = await sendToBackground({ type: 'GET_STATE' })
-    if (state.ok) {
-      setWalletName(state.walletName ?? '')
-      setAddress(state.address ?? '')
-      setPhase(state.state === 'unlocked' ? 'confirm' : 'unlock')
-    } else {
+    if (!state.ok) {
       setError(state.error)
       setPhase('expired')
+      return
     }
+    const activeWallet = state.wallets?.find(w => w.active)
+    if (activeWallet && activeWallet.id !== p.pending.walletId) {
+      setError('The active wallet changed — this request is no longer valid. Retry from the site.')
+      setPhase('expired')
+      await sendToBackground({ type: 'DAPP_REJECT', reqId }).catch(() => {})
+      return
+    }
+    setPhase(state.state === 'unlocked' ? 'confirm' : 'unlock')
   }
 
   useEffect(() => { load() }, [])
@@ -95,7 +102,7 @@ export function ApprovalApp() {
           <div className="origin">{pending.origin}</div>
           <div className="card">
             <p className="muted">
-              Unlock <b>{walletName || 'your wallet'}</b> to review this request.
+              Unlock <b>{pending.walletName || 'your wallet'}</b> to review this request.
             </p>
             <input type="password" autoFocus placeholder="Password" value={password}
               onChange={e => setPassword(e.target.value)}
@@ -115,7 +122,8 @@ export function ApprovalApp() {
             reqId={reqId}
             origin={pending.origin}
             params={pending.params as unknown as SendReqParams}
-            walletName={walletName}
+            walletName={pending.walletName}
+            expect={{ walletId: pending.walletId, generation: pending.sessionGeneration }}
             onDone={() => window.close()}
           />
         ) : pending.method === 'bdx_signMessage' ? (
@@ -123,15 +131,16 @@ export function ApprovalApp() {
             reqId={reqId}
             origin={pending.origin}
             params={pending.params as unknown as SignReqParams}
-            walletName={walletName}
+            walletName={pending.walletName}
+            expect={{ walletId: pending.walletId, generation: pending.sessionGeneration }}
             onDone={() => window.close()}
           />
         ) : (
           <ConnectApprovalCard
             reqId={reqId}
             origin={pending.origin}
-            walletName={walletName}
-            address={address}
+            walletName={pending.walletName}
+            address={pending.walletAddress}
             onDone={() => window.close()}
           />
         )

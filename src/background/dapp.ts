@@ -44,7 +44,20 @@ const ATOMIC = 1_000_000_000n
 interface Grant { walletId: string; grantedAt: number }
 type GrantMap = Record<string, Grant>
 
-interface PendingMeta { origin: string; method: DappMethod; createdAt: number; params?: object }
+interface PendingMeta {
+  origin: string
+  method: DappMethod
+  createdAt: number
+  params?: object
+  /** IMMUTABLE approval context (external audit): the wallet that was active —
+   *  and whose identity the approval surface displays — when this request was
+   *  queued. Grant creation / signing / tx construction must still match it. */
+  walletId: string
+  /** Session generation at queue time. Null when no session existed (a request
+   *  queued while locked, reviewed after the unlock the approval surface
+   *  itself performs); the walletId binding still applies. */
+  sessionGeneration: string | null
+}
 
 interface PendingLive extends PendingMeta {
   /** The id the PAGE generated for this request. Replies must echo it: the
@@ -76,7 +89,7 @@ async function getActiveId(): Promise<string | null> {
   const id = (await chrome.storage.local.get(ACTIVE_KEY))[ACTIVE_KEY]
   return typeof id === 'string' && id ? id : null
 }
-async function getSession(): Promise<{ walletId: string; secrets: WalletSecrets } | null> {
+async function getSession(): Promise<{ walletId: string; generation: string; secrets: WalletSecrets } | null> {
   return (await sessionStore.get(SESSION_KEY))[SESSION_KEY] ?? null
 }
 async function getGrants(): Promise<GrantMap> {
@@ -156,19 +169,20 @@ async function broadcast(event: DappEvent, data: unknown, walletId: string | nul
 
 // Called from background/index.ts at the relevant state transitions:
 
-export async function dappNotifyLocked(): Promise<void> {
-  // Scoped to the ACTIVE wallet's grantees. A site granted only for
-  // another wallet must not observe this wallet's lock/unlock activity —
-  // that's cross-wallet linkage the per-wallet grant model exists to prevent.
-  const activeId = await getActiveId()
-  if (activeId) await broadcast('lock', {}, activeId)
+// Lock/unlock take the wallet id EXPLICITLY from the session that actually
+// locked/unlocked (external audit): these run detached from startSession/
+// endSession, and re-reading the active id here could pair one wallet's
+// address or event with another wallet's grantee set after a rapid switch.
+// They stay scoped per-wallet: a site granted only for another wallet must
+// not observe this wallet's lock/unlock activity.
+
+export async function dappNotifyLocked(walletId: string): Promise<void> {
+  await broadcast('lock', {}, walletId)
 }
 
-export async function dappNotifyUnlocked(address: string): Promise<void> {
-  const activeId = await getActiveId()
-  if (!activeId) return
-  await broadcast('unlock', {}, activeId) // active wallet's grantees only
-  await broadcast('connect', { address, network: nettype() }, activeId)
+export async function dappNotifyUnlocked(walletId: string, address: string): Promise<void> {
+  await broadcast('unlock', {}, walletId)
+  await broadcast('connect', { address, network: nettype() }, walletId)
 }
 
 export async function dappNotifyWalletSwitched(): Promise<void> {
@@ -188,8 +202,9 @@ export async function dappNotifyBalanceFromInfo(info: Record<string, unknown>): 
   await broadcast('balanceChanged', b, activeId)
 }
 
-/** A wallet was deleted: drop its grants and tell those origins. */
+/** A wallet was deleted: drop its grants, void its approvals, tell those origins. */
 export async function dappCleanupWallet(walletId: string): Promise<void> {
+  await rejectPendingWhere(m => m.walletId === walletId, 'wallet removed — request cancelled')
   const grants = await getGrants()
   let changed = false
   for (const [origin, g] of Object.entries(grants)) {
@@ -199,6 +214,38 @@ export async function dappCleanupWallet(walletId: string): Promise<void> {
     sendToOrigin(origin, 'disconnect', {})
   }
   if (changed) await setGrants(grants)
+}
+
+// ---- pending-approval invalidation (external audit: immutable context) ------
+
+/** Reject + remove every pending approval (live AND persisted) matching pred. */
+async function rejectPendingWhere(pred: (m: PendingMeta) => boolean, message: string): Promise<void> {
+  const all: Record<string, PendingMeta> = (await sessionStore.get(PENDING_KEY))[PENDING_KEY] ?? {}
+  let any = false
+  for (const [reqId, meta] of Object.entries(all)) {
+    if (!pred(meta)) continue
+    settlePending(reqId, { error: err(ERR.EXPIRED, message) })
+    const live = pendingLive.get(reqId)
+    if (live?.windowId !== undefined) chrome.windows.remove(live.windowId).catch(() => {})
+    await removePending(reqId)
+    any = true
+  }
+  if (any) notifyPanels()
+}
+
+/** Session ended (lock, wipe, or replacement): send/sign approvals were
+ *  reviewed against that session's identity and must be re-requested.
+ *  Connect approvals survive — unlock-then-approve is a supported flow —
+ *  but remain bound to their recorded walletId. */
+export async function dappInvalidateOnSessionEnd(): Promise<void> {
+  await rejectPendingWhere(m => m.method !== 'bdx_connect', 'wallet locked — request cancelled')
+}
+
+/** The active wallet changed: every approval queued for another wallet is
+ *  void. Approving it would pair the displayed identity (and the origin's
+ *  grant) with a different wallet's keys. */
+export async function dappInvalidateForWallet(activeId: string): Promise<void> {
+  await rejectPendingWhere(m => m.walletId !== activeId, 'wallet changed — request cancelled')
 }
 
 // ---- balance ---------------------------------------------------------------
@@ -624,7 +671,9 @@ async function handleMethod(
       if ((await pendingConflicts(origin)).origin) {
         return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
-      await queueApproval(origin, req.method, undefined, req.id, respond, tabId)
+      // Bind the approval to the wallet being displayed. Generation is null:
+      // connect may legitimately be approved after the surface's own unlock.
+      await queueApproval(origin, req.method, undefined, req.id, respond, tabId, activeId, null)
       return // settled later by DAPP_APPROVE / DAPP_REJECT / window close / TTL
     }
 
@@ -638,7 +687,11 @@ async function handleMethod(
       const conflicts = await pendingConflicts(origin) // live + persisted
       if (conflicts.send) return fail(err(ERR.INTERNAL, 'transaction already in progress'))
       if (conflicts.origin) return fail(err(ERR.INTERNAL, 'approval already pending'))
-      await queueApproval(origin, req.method, v.send as unknown as object, req.id, respond, tabId)
+      {
+        const session = await getSession()
+        const generation = session && session.walletId === activeId ? session.generation : null
+        await queueApproval(origin, req.method, v.send as unknown as object, req.id, respond, tabId, activeId, generation)
+      }
       return // settled by DAPP_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
     }
 
@@ -652,7 +705,7 @@ async function handleMethod(
       if ((await pendingConflicts(origin)).origin) { // live + persisted
         return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
-      await queueApproval(origin, req.method, { message: v.message }, req.id, respond, tabId)
+      await queueApproval(origin, req.method, { message: v.message }, req.id, respond, tabId, activeId, session.generation)
       return // settled by DAPP_SIGN_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
     }
 
@@ -685,11 +738,14 @@ async function queueApproval(
   params: object | undefined,
   pageReqId: string,
   respond: (msg: DappPortMessage) => void,
-  tabId?: number
+  tabId: number | undefined,
+  walletId: string,
+  sessionGeneration: string | null
 ): Promise<void> {
   const reqId = crypto.randomUUID()
   const meta: PendingMeta = {
-    origin, method, createdAt: Date.now(), ...(params !== undefined ? { params } : {})
+    origin, method, createdAt: Date.now(), walletId, sessionGeneration,
+    ...(params !== undefined ? { params } : {})
   }
   const timer = setTimeout(async () => {
     settlePending(reqId, { error: err(ERR.EXPIRED, 'approval expired') })
@@ -710,7 +766,7 @@ async function queueApproval(
 /** Oldest live approval request — what an open side panel should display.
  *  Also prunes expired entries. */
 export async function dappFirstPending(): Promise<
-  { reqId: string; origin: string; method: string; params?: object } | null
+  ({ reqId: string } & Awaited<ReturnType<typeof pendingView>>) | null
 > {
   const all: Record<string, PendingMeta> = (await sessionStore.get(PENDING_KEY))[PENDING_KEY] ?? {}
   let best: { reqId: string; meta: PendingMeta } | null = null
@@ -719,27 +775,35 @@ export async function dappFirstPending(): Promise<
     if (!best || meta.createdAt < best.meta.createdAt) best = { reqId, meta }
   }
   if (!best) return null
+  return { reqId: best.reqId, ...(await pendingView(best.meta)) }
+}
+
+/** What the approval surfaces render + bind against: the pending metadata
+ *  plus the RECORDED wallet's identity (external audit: the display must come
+ *  from the immutable approval context, not from whatever is active now). */
+async function pendingView(meta: PendingMeta): Promise<{
+  origin: string; method: string; params?: object
+  walletId: string; sessionGeneration: string | null
+  walletName: string; walletAddress: string
+}> {
+  const w = (await getWallets())[meta.walletId]
   return {
-    reqId: best.reqId, origin: best.meta.origin, method: best.meta.method,
-    ...(best.meta.params !== undefined ? { params: best.meta.params } : {})
+    origin: meta.origin, method: meta.method,
+    ...(meta.params !== undefined ? { params: meta.params } : {}),
+    walletId: meta.walletId, sessionGeneration: meta.sessionGeneration,
+    walletName: w?.name ?? '', walletAddress: w?.address ?? ''
   }
 }
 
 export async function dappGetPending(reqId: string): Promise<
-  { ok: true; pending: { origin: string; method: string; params?: object } } | { ok: false; error: string }
+  { ok: true; pending: Awaited<ReturnType<typeof pendingView>> } | { ok: false; error: string }
 > {
   const all = (await sessionStore.get(PENDING_KEY))[PENDING_KEY] ?? {}
   const meta: PendingMeta | undefined = all[reqId]
   if (!meta || Date.now() - meta.createdAt > APPROVAL_TTL_MS) {
     return { ok: false, error: 'This request has expired — retry from the site.' }
   }
-  return {
-    ok: true,
-    pending: {
-      origin: meta.origin, method: meta.method,
-      ...(meta.params !== undefined ? { params: meta.params } : {})
-    }
-  }
+  return { ok: true, pending: await pendingView(meta) }
 }
 
 export async function dappApprove(reqId: string): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -755,6 +819,14 @@ export async function dappApprove(reqId: string): Promise<{ ok: true } | { ok: f
   const activeId = await getActiveId()
   if (!session || !activeId || session.walletId !== activeId) {
     return { ok: false, error: 'Unlock the wallet first' }
+  }
+  // External audit: the grant must go to the wallet the user was SHOWN when
+  // the request was queued — never to whatever became active meanwhile.
+  if (meta.walletId !== activeId) {
+    settlePending(reqId, { error: err(ERR.EXPIRED, 'wallet changed — request cancelled') })
+    await removePending(reqId)
+    notifyPanels()
+    return { ok: false, error: 'The active wallet changed — ask the site to reconnect.' }
   }
   if (insecureOrigin(meta.origin)) { // cannot be granted, ever
     settlePending(reqId, { error: err(ERR.UNAUTHORIZED, 'insecure (http) origins cannot connect') })

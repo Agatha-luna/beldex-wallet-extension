@@ -61,11 +61,14 @@ function displayUnits(atomic: bigint): string {
 
 type Phase = 'review' | 'signing' | 'success' | 'failed'
 
-export function SendApprovalCard({ reqId, origin, params, walletName, onDone }: {
+export function SendApprovalCard({ reqId, origin, params, walletName, expect, onDone }: {
   reqId: string
   origin: string
   params: SendReqParams
   walletName: string
+  /** Immutable approval context recorded when the request was queued —
+   *  GET_SECRETS refuses if the session/wallet changed since review began. */
+  expect: { walletId: string; generation: string | null }
   onDone: () => void
 }) {
   const [phase, setPhase] = useState<Phase>('review')
@@ -85,7 +88,7 @@ export function SendApprovalCard({ reqId, origin, params, walletName, onDone }: 
     let stop = false
     ;(async () => {
       try {
-        const s = await sendToBackground({ type: 'GET_SECRETS' })
+        const s = await sendToBackground({ type: 'GET_SECRETS', expect })
         if (!s.ok || !s.secrets) return
         // Current network fee rates ride along on /get_unspent_outs
         // (wallet_light_rpc.h GET_UNSPENT_OUTS: per_byte_fee / per_kb_fee).
@@ -125,8 +128,10 @@ export function SendApprovalCard({ reqId, origin, params, walletName, onDone }: 
     const lock = await sendToBackground({ type: 'SEND_LOCK_ACQUIRE' })
     if (!lock.ok) { setError(lock.error); setPhase('review'); return }
     try {
-      const s = await sendToBackground({ type: 'GET_SECRETS' })
-      if (!s.ok || !s.secrets) throw new Error('Wallet locked — unlock and retry')
+      // Bound fetch: fails if the wallet or session changed since this card
+      // was rendered — the tx must be built with the DISPLAYED wallet's keys.
+      const s = await sendToBackground({ type: 'GET_SECRETS', expect })
+      if (!s.ok || !s.secrets) throw new Error(s.ok ? 'Wallet locked — unlock and retry' : s.error)
 
       const r = await sendFunds({
         secrets: s.secrets,

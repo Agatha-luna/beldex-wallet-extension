@@ -22,7 +22,10 @@ export type BgRequest =
   | { type: 'SAVE_WALLET'; secrets: WalletSecrets; password: string; name?: string }
   | { type: 'UNLOCK'; password: string }
   | { type: 'LOCK' }
-  | { type: 'GET_SECRETS' }
+  // `expect` (approval flows): refuse secrets unless the current session AND
+  // active wallet still match the context recorded when the request was
+  // queued. generation:null binds the wallet only (request queued while locked).
+  | { type: 'GET_SECRETS'; expect?: { walletId: string; generation: string | null } }
   | { type: 'REVEAL'; password: string }
   | { type: 'CHANGE_PASSWORD'; oldPassword: string; newPassword: string }
   | { type: 'GET_AUTOLOCK' }
@@ -47,6 +50,16 @@ export type BgRequest =
 
 export type WalletState = 'uninitialized' | 'locked' | 'unlocked'
 
+export interface PendingApproval {
+  origin: string
+  method: string
+  params?: object
+  walletId: string
+  sessionGeneration: string | null
+  walletName: string
+  walletAddress: string
+}
+
 export type BgResponse =
   | {
       ok: true
@@ -56,9 +69,11 @@ export type BgResponse =
       minutes?: number
       walletName?: string
       wallets?: WalletMeta[]
-      // dapp bridge
-      pending?: { origin: string; method: string; params?: object }
-      pendingReq?: { reqId: string; origin: string; method: string; params?: object } | null
+      // dapp bridge. Wallet fields describe the wallet RECORDED when the
+      // request was queued (immutable approval context) — approval surfaces
+      // must render and bind against these, not the currently active wallet.
+      pending?: PendingApproval
+      pendingReq?: ({ reqId: string } & PendingApproval) | null
       origins?: Array<{ origin: string; grantedAt: number }>
       activeSite?: { origin: string; connected: boolean } | null
     }

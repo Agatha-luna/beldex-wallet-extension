@@ -23,11 +23,14 @@ export interface SignReqParams {
 
 type Phase = 'review' | 'signing' | 'failed'
 
-export function SignApprovalCard({ reqId, origin, params, walletName, onDone }: {
+export function SignApprovalCard({ reqId, origin, params, walletName, expect, onDone }: {
   reqId: string
   origin: string
   params: SignReqParams
   walletName: string
+  /** Immutable approval context recorded when the request was queued —
+   *  GET_SECRETS refuses if the session/wallet changed since review began. */
+  expect: { walletId: string; generation: string | null }
   onDone: () => void
 }) {
   const [phase, setPhase] = useState<Phase>('review')
@@ -47,8 +50,8 @@ export function SignApprovalCard({ reqId, origin, params, walletName, onDone }: 
   const approve = async () => {
     setPhase('signing'); setError('')
     try {
-      const s = await sendToBackground({ type: 'GET_SECRETS' })
-      if (!s.ok || !s.secrets) throw new Error('Wallet is locked — unlock and try again.')
+      const s = await sendToBackground({ type: 'GET_SECRETS', expect })
+      if (!s.ok || !s.secrets) throw new Error(s.ok ? 'Wallet is locked — unlock and try again.' : s.error)
 
       const { signature, pubkey } = signMessage(
         params.message, s.secrets.secSpendKey, s.secrets.pubSpendKey
