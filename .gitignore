@@ -9,3 +9,6 @@ firefox-testnet/
 .DS_Store
 SECURITY_AUDIT.md
 HANDOFF.md
+
+# Local audit/AI working docs (not part of the deliverable)
+AI_PROMPT_*.md
