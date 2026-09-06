@@ -32,6 +32,18 @@ test('dappProtocol.ts declares the exact protocol v1 method set', () => {
   assert.ok(src.includes('PROTOCOL_VERSION = 1'))
 })
 
+// Bidirectional drift guard (external audit — docs/types must not diverge from
+// code): the DAPP_METHODS array actually declared in source must EXACTLY equal
+// the list this test (and the README table) pin. Adding or removing a wire
+// method without updating both fails CI here.
+test('DAPP_METHODS in source matches the pinned set exactly', () => {
+  const block = src.match(/DAPP_METHODS\s*=\s*\[([\s\S]*?)\]/)
+  assert.ok(block, 'could not locate DAPP_METHODS in dappProtocol.ts')
+  const declared = [...block[1].matchAll(/'([^']+)'/g)].map(m => m[1])
+  assert.deepEqual([...declared].sort(), [...METHODS].sort(),
+    'DAPP_METHODS drifted from the pinned method set — update the README table and this test')
+})
+
 test('dappProtocol.ts declares the exact protocol v1 error codes', () => {
   for (const pair of [
     'USER_REJECTED: 4001', 'UNAUTHORIZED: 4100', 'LOCKED: 4900',

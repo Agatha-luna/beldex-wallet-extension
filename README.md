@@ -46,23 +46,26 @@ Key invariants:
   `node_modules` into the build dir so it loads from the extension origin (satisfies MV3's
   no-remote-code rule; CSP includes `wasm-unsafe-eval`).
 
-### The embind CSP patch (important)
+### The embind CSP fix (important)
 
-The published WASM glue uses `new Function` (embind's `createNamedFunction` and
-`craftInvokerFunction`), which MV3's CSP forbids — `unsafe-eval` is never grantable, only
-`wasm-unsafe-eval`. `patches/@bdxi+beldex-app-bridge+3.0.0.patch`, applied by `patch-package`
-on `postinstall`, rewrites both with eval-free equivalents (what Emscripten's
-`-sDYNAMIC_EXECUTION=0` would emit). `test/bridge.test.mjs` runs under
-`node --disallow-code-generation-from-strings` — the same restriction — and exercises every
-bridge call the extension uses.
+MV3's CSP forbids `new Function` — `unsafe-eval` is never grantable, only `wasm-unsafe-eval`.
+Emscripten's embind used to assemble invokers with `new Function` (`createNamedFunction` /
+`craftInvokerFunction`); **`@bdxi/beldex-app-bridge` 3.0.1 ships the eval-free equivalents**
+(what `-sDYNAMIC_EXECUTION=0` emits), so the wallet no longer carries a `patch-package` patch —
+the dependency is **exact-pinned to 3.0.1** (no caret) so new glue *and* a new unaudited WASM
+binary can't install silently. `test/bridge.test.mjs` runs under
+`node --disallow-code-generation-from-strings` — the same restriction the browser CSP enforces —
+and exercises every bridge call the extension uses, so a CSP regression in any future bump fails
+CI.
 
-**If `@bdxi/beldex-app-bridge` is ever bumped, the patch must be re-created and the tests
-re-run.** The long-term fix is for `beldex-core-cpp` to be rebuilt with `-sDYNAMIC_EXECUTION=0`.
+**If `@bdxi/beldex-app-bridge` is ever bumped:** review the new glue diff, verify the WASM binary
+hash (recorded in the handoff notes), update the exact pin, and re-run the tests. The long-term
+fix is for `beldex-core-cpp` to ship `-sDYNAMIC_EXECUTION=0` builds with a reproducible recipe.
 
 ## Setup
 
 ```bash
-npm install                    # postinstall applies the embind patch — do not skip
+npm install                    # exact-pinned deps (no postinstall patch step)
 npm run build                  # mainnet, both browsers
 npm run build:chrome           # -> dist/
 npm run build:firefox          # -> firefox/
@@ -70,7 +73,7 @@ npm run build:testnet          # testnet, both browsers
 npm run build:chrome:testnet   # -> dist-testnet/
 npm run build:firefox:testnet  # -> firefox-testnet/
 npm run typecheck
-npm test                       # CSP-strict bridge + dapp-protocol tests
+npm test                       # CSP-strict bridge + dapp protocol/conformance tests
 npx web-ext lint --source-dir=firefox --self-hosted
 ```
 
@@ -137,20 +140,48 @@ amber **TESTNET** badge in the panel header.
 | Settings: reveal seed/view/spend key, change password, rename, auto-lock, delete | done |
 | Dapp bridge: `window.beldex` provider, per-origin grants, connect + send approval UI | done |
 | Incoming-funds notifications (with optional amount hiding) | done |
-| `bdx_signMessage` / `bdx_verifyMessage` | declared in the protocol, **not implemented** — returns `METHOD_NOT_FOUND` |
+| `bdx_signMessage` / `bdx_verifyMessage` | done — approval-gated signing (`SignApprovalCard`), keyless public verify |
+| `bdx_signAuthChallenge` | done — wallet-composed sign-in proof (origin set by the wallet, not the page) |
+| `bdx_sendTransaction` operation recovery | done — `bdx_getOperationStatus` + optional `idempotencyKey` |
 | Subaddresses | **not supported by design** — the LWS cannot scan them (see below) |
 | Per-tx fee in history | not available — LWS doesn't return it; could be cached at send time |
 
 ### Dapp bridge
 
 Implements the `bdx-web3js` wire protocol (`PROTOCOL.md` v1). Discovery uses an EIP-6963-style
-`beldex:requestProvider` / `beldex:announceProvider` handshake. Reads (`bdx_getState`,
-`bdx_getNetwork`, `bdx_resolveBns`) are open; `bdx_getAddress` / `bdx_getBalance` require a
-grant; `bdx_connect` and `bdx_sendTransaction` raise a user approval — rendered in-panel when
-the panel is open, otherwise in a MetaMask-style popup anchored top-right. Sends take a global
-single-flight lock shared with the panel's own send flow, and the approval card shows a real
-WASM-computed fee estimate. Connected sites are listed (and revocable) in Settings and in a
-bottom site bar.
+`beldex:requestProvider` / `beldex:announceProvider` handshake. The full method set is the source
+of truth in `src/lib/dappProtocol.ts` (`DAPP_METHODS`), and `test/dapp-protocol.test.mjs` pins it:
+
+- **Open (no grant), rate-limited:** `bdx_getState`, `bdx_getNetwork`, `bdx_resolveBns`,
+  `bdx_verifyMessage`.
+- **Grant required:** `bdx_getAddress`, `bdx_getBalance`, `bdx_getOperationStatus`.
+- **Grant + user approval:** `bdx_connect`, `bdx_sendTransaction`, `bdx_signMessage`,
+  `bdx_signAuthChallenge` — rendered in-panel when the panel is open, otherwise in a
+  MetaMask-style popup anchored top-right.
+
+Sends take a global single-flight lock shared with the panel's own send flow, and the approval
+card shows a real WASM-computed fee estimate. Connected sites are listed (and revocable) in
+Settings and in a bottom site bar.
+
+**Deliberate deviations from the SDK's `PROTOCOL.md` (privacy/anti-phishing hardening):**
+
+- **`walletVersion` is grant-gated.** `bdx_getNetwork` returns `nettype`, `height` and
+  `protocolVersion` to any origin, but `walletVersion` only to a granted one — version
+  granularity is useful for phishing-kit targeting, so ungranted pages don't get it. `bdx_getState`
+  is likewise coarse pre-grant (collapses locked/unlocked to `locked`).
+- **The origin is shown as ASCII/punycode, never Unicode-decoded.** Approval cards render the
+  browser-reported origin verbatim so homograph lookalikes (`xn--…`) stay visible rather than
+  being decoded into a convincing spoof.
+- **Insecure (`http://`) origins can't connect.** Content scripts inject only into `https` (plus
+  loopback for dev), and the background refuses to grant any impersonatable `http://` origin.
+- **Request `id`s are correlation handles, not authentication.** The inpage provider matches
+  responses to its own pending map by `id`; this de-duplicates replies, it does **not**
+  authenticate the sender. The MAIN-world provider runs in the page's context and is assumed
+  hostile — every trust decision (origin, grant, approval) is made in the background from
+  browser-supplied `port.sender`, never from anything the page provides.
+- **Send outcomes are recoverable.** An approved send transitions to an EXECUTING operation whose
+  outcome is persisted before any reply; a client that times out uses `bdx_getOperationStatus` or
+  an `idempotencyKey` retry rather than treating a timeout as proof of non-execution.
 
 ## Known limitations / open items
 
@@ -164,10 +195,10 @@ bottom site bar.
 3. **Subaddresses** aren't supported by the MyMonero-lineage core + LWS combination; funds sent
    to one would be invisible. Integrated addresses are the deliberate substitute. Proper support
    needs LWS-side subaddress registration (à la monero-lws) first.
-4. **Firefox < 115** falls back to an in-memory session (`src/lib/sessionStore.ts`) — it works,
-   but sessions die with the event page and the storage-driven panel lock doesn't fire. 115+ is
-   the real baseline; the manifest's hard `strict_min_version` was removed for testing and
-   **should be restored before store submission**.
+4. **Firefox baseline is 128** (`strict_min_version` in `manifest.firefox.json`). MAIN-world
+   content scripts — how the provider is injected before page scripts run — need Firefox 128+;
+   on older versions the provider would land in the isolated world and dapps wouldn't see
+   `window.beldex`. (`storage.session` also needs 115+; 128 covers both.)
 5. **AMO data-collection declaration** is `["none"]` — defensible (the view key goes to the
    app's own backend), but confirm against Mozilla policy before publishing.
 6. **Verify before mainnet ship.** Send end-to-end on testnet after any core/bridge bump —
