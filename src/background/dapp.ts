@@ -35,11 +35,81 @@ const CACHE_KEY = 'sync_cache'
 const GRANTS_KEY = 'dapp_origins'          // storage.local
 const PENDING_KEY = 'dapp_pending'         // storage.session (metadata only)
 const CORRECTED_KEY = 'corrected_balance'  // storage.session, written by the panel (Dashboard)
+const OPS_KEY = 'dapp_operations'          // storage.session: send operation state machine
 
 const APPROVAL_TTL_MS = 5 * 60_000
+const OPERATION_TTL_MS = 24 * 3600_000     // keep send outcomes queryable for a day
 const READS_PER_MINUTE = 10
 const BALANCE_STALE_MS = 60_000
 const ATOMIC = 1_000_000_000n
+
+// ---- send operation state machine (external audit) --------------------------
+//
+// A send is irreversible, so its execution must NOT be terminated by an
+// approval-timeout / lost-channel path once it has started broadcasting, and
+// its outcome must be persisted BEFORE any reply so the dapp can recover it
+// after a timeout or service-worker restart. States:
+//
+//   (approved) --beginSend--> executing --recordBroadcast--> confirmed
+//                                        \--recordFailed---> failed
+//
+// The PENDING->executing transition (dappBeginSend) is atomic: it verifies the
+// wallet/session binding, cancels the review TTL timer, drops the persisted
+// pending metadata (so nothing can later expire it), mints an unguessable
+// execution token, and records the operation. dappComplete/dappFail then
+// require that token and persist the outcome first. bdx_getOperationStatus and
+// an optional dapp-supplied idempotencyKey give the dapp a safe recovery /
+// replay path instead of the "4999 is safe to retry" duplicate-payment trap.
+
+type OperationState = 'executing' | 'confirmed' | 'failed'
+
+interface OperationRecord {
+  operationId: string
+  executionToken: string
+  origin: string
+  walletId: string
+  idempotencyKey?: string
+  state: OperationState
+  txHash?: string
+  fee?: string
+  createdAt: number
+  updatedAt: number
+}
+
+type OperationMap = Record<string, OperationRecord>
+
+async function getOperations(): Promise<OperationMap> {
+  const all: OperationMap = (await sessionStore.get(OPS_KEY))[OPS_KEY] ?? {}
+  return all
+}
+
+/** Load operations, dropping any past their TTL. Persists the pruned map only
+ *  when something was actually removed. */
+async function liveOperations(): Promise<OperationMap> {
+  const all = await getOperations()
+  const now = Date.now()
+  let pruned = false
+  for (const [id, op] of Object.entries(all)) {
+    if (now - op.createdAt > OPERATION_TTL_MS) { delete all[id]; pruned = true }
+  }
+  if (pruned) await sessionStore.set({ [OPS_KEY]: all })
+  return all
+}
+
+async function putOperation(op: OperationRecord): Promise<void> {
+  const all = await getOperations()
+  all[op.operationId] = op
+  await sessionStore.set({ [OPS_KEY]: all })
+}
+
+/** The origin's operation for a given idempotency key, if any (TTL-pruned). */
+async function findOperationByKey(origin: string, key: string): Promise<OperationRecord | null> {
+  const all = await liveOperations()
+  for (const op of Object.values(all)) {
+    if (op.origin === origin && op.idempotencyKey === key) return op
+  }
+  return null
+}
 
 interface Grant { walletId: string; grantedAt: number }
 type GrantMap = Record<string, Grant>
@@ -69,6 +139,17 @@ interface PendingLive extends PendingMeta {
   respond: (msg: DappPortMessage) => void
   timer: ReturnType<typeof setTimeout>
   windowId?: number
+  /** The content-script port that carried this request. Used to reject a
+   *  still-PENDING send/sign approval when its page's channel dies (external
+   *  audit: those must not stay actionable after a lost live channel; connect
+   *  survives, being recoverable via the persisted grant). */
+  owner?: chrome.runtime.Port
+  /** Set once dappBeginSend transitions this send to EXECUTING. From then on
+   *  the review timer is cancelled and neither TTL nor channel-loss may fail
+   *  it — the outcome is owned by the operation record. */
+  executing?: boolean
+  executionToken?: string
+  operationId?: string
 }
 
 // ---- state (service-worker lifetime) ---------------------------------------
@@ -331,7 +412,13 @@ export interface ValidatedSend {
   amount?: string
   priority: 1 | 2 | 3 | 4 | 5
   sweep: boolean
+  /** Optional dapp-supplied idempotency key (external audit): retrying a send
+   *  with the same key returns the existing operation's outcome instead of
+   *  creating a second approved payment. */
+  idempotencyKey?: string
 }
+
+const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._-]{8,128}$/
 
 /** Validate bdx_sendTransaction params per PROTOCOL.md §4.5. Returns the
  *  normalized params or an error message naming the offending field. */
@@ -362,7 +449,21 @@ export function validateSendParams(params: unknown): { ok: true; send: Validated
     // payment ID safely.
     return { ok: false, error: 'field "paymentId" not supported — use an integrated address' }
   }
-  return { ok: true, send: { to: (p.to as string).trim(), priority, sweep, ...(amount !== undefined ? { amount } : {}) } }
+  let idempotencyKey: string | undefined
+  if (p.idempotencyKey !== undefined) {
+    if (typeof p.idempotencyKey !== 'string' || !IDEMPOTENCY_KEY_RE.test(p.idempotencyKey)) {
+      return { ok: false, error: 'invalid field "idempotencyKey" (8–128 chars of [A-Za-z0-9._-])' }
+    }
+    idempotencyKey = p.idempotencyKey
+  }
+  return {
+    ok: true,
+    send: {
+      to: (p.to as string).trim(), priority, sweep,
+      ...(amount !== undefined ? { amount } : {}),
+      ...(idempotencyKey !== undefined ? { idempotencyKey } : {})
+    }
+  }
 }
 
 /** Longest message a site may ask the user to sign. Long enough for an
@@ -680,7 +781,8 @@ async function handleMethod(
   req: DappPortRequest,
   respond: (msg: DappPortMessage) => void,
   tabId?: number,
-  senderUrl?: string
+  senderUrl?: string,
+  port?: chrome.runtime.Port
 ): Promise<void> {
   const reply = (result: unknown) => respond({ id: req.id, result })
   const fail = (e: { code: number; message: string }) => respond({ id: req.id, error: e })
@@ -788,6 +890,20 @@ async function handleMethod(
       if (!activeId) return fail(err(ERR.UNAUTHORIZED, 'origin not connected'))
       const v = validateSendParams(req.params)
       if (!v.ok) return fail(err(ERR.INVALID_PARAMS, v.error))
+      // Idempotency (external audit): a retry with the same key must never
+      // create a second approved payment. Replay the recorded outcome instead.
+      if (v.send.idempotencyKey) {
+        const prior = await findOperationByKey(origin, v.send.idempotencyKey)
+        if (prior) {
+          if (prior.state === 'confirmed') {
+            return reply({ txHash: prior.txHash, fee: prior.fee ?? '0', operationId: prior.operationId, idempotent: true })
+          }
+          if (prior.state === 'executing') {
+            return fail(err(ERR.INTERNAL, 'a transaction for this idempotency key is already in progress'))
+          }
+          // 'failed' falls through: a new attempt for the same key is allowed.
+        }
+      }
       // Global single-flight: one send at a time across dapp + panel flows.
       if (await sendLockHeld()) return fail(err(ERR.INTERNAL, 'transaction already in progress'))
       const conflicts = await pendingConflicts(origin) // live + persisted
@@ -796,9 +912,26 @@ async function handleMethod(
       {
         const session = await getSession()
         const generation = session && session.walletId === activeId ? session.generation : null
-        await queueApproval(origin, req.method, v.send as unknown as object, req.id, respond, tabId, activeId, generation)
+        await queueApproval(origin, req.method, v.send as unknown as object, req.id, respond, tabId, activeId, generation, port)
       }
       return // settled by DAPP_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
+    }
+
+    case 'bdx_getOperationStatus': {
+      // Recovery path (external audit): after a client timeout or lost channel
+      // a dapp can learn the true outcome instead of blindly retrying. Only the
+      // origin that created the operation may read it; grant + rate limit apply.
+      const activeId = await grantedActiveId(origin)
+      if (!activeId) return fail(err(ERR.UNAUTHORIZED, 'origin not connected'))
+      if (!readAllowed(origin)) return fail(err(ERR.INTERNAL, 'rate limited — slow down'))
+      const opId = (req.params as { operationId?: unknown } | undefined)?.operationId
+      if (typeof opId !== 'string' || !opId) return fail(err(ERR.INVALID_PARAMS, 'invalid field "operationId"'))
+      const op = (await liveOperations())[opId]
+      if (!op || op.origin !== origin) return reply({ status: 'unknown' })
+      return reply({
+        status: op.state, operationId: op.operationId,
+        ...(op.state === 'confirmed' ? { txHash: op.txHash, fee: op.fee ?? '0' } : {})
+      })
     }
 
     case 'bdx_signMessage': {
@@ -811,7 +944,7 @@ async function handleMethod(
       if ((await pendingConflicts(origin)).origin) { // live + persisted
         return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
-      await queueApproval(origin, req.method, { message: v.message }, req.id, respond, tabId, activeId, session.generation)
+      await queueApproval(origin, req.method, { message: v.message }, req.id, respond, tabId, activeId, session.generation, port)
       return // settled by DAPP_SIGN_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
     }
 
@@ -832,7 +965,7 @@ async function handleMethod(
       }
       await queueApproval(
         origin, req.method, { message: composed.message, fields: composed.fields },
-        req.id, respond, tabId, activeId, session.generation
+        req.id, respond, tabId, activeId, session.generation, port
       )
       return // settled by DAPP_AUTH_SIGN_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
     }
@@ -868,7 +1001,8 @@ async function queueApproval(
   respond: (msg: DappPortMessage) => void,
   tabId: number | undefined,
   walletId: string,
-  sessionGeneration: string | null
+  sessionGeneration: string | null,
+  owner?: chrome.runtime.Port
 ): Promise<void> {
   const reqId = crypto.randomUUID()
   const meta: PendingMeta = {
@@ -876,13 +1010,16 @@ async function queueApproval(
     ...(params !== undefined ? { params } : {})
   }
   const timer = setTimeout(async () => {
+    // An EXECUTING send owns its own outcome — the TTL must never fire on it
+    // (the timer is cancelled at beginSend, so this is belt-and-braces).
+    if (pendingLive.get(reqId)?.executing) return
     settlePending(reqId, { error: err(ERR.EXPIRED, 'approval expired') })
     const live = pendingLive.get(reqId)
     await removePending(reqId)
     if (live?.windowId !== undefined) chrome.windows.remove(live.windowId).catch(() => {})
     notifyPanels()
   }, APPROVAL_TTL_MS)
-  pendingLive.set(reqId, { ...meta, pageReqId, respond, timer })
+  pendingLive.set(reqId, { ...meta, pageReqId, respond, timer, ...(owner ? { owner } : {}) })
   await persistPending(reqId, meta)
   await openApproval(reqId, tabId)
 }
@@ -979,14 +1116,75 @@ export async function dappReject(reqId: string): Promise<{ ok: true }> {
   return { ok: true }
 }
 
-/** Send flow finished in the approval surface (panel/popup): deliver the
- *  result to the waiting dapp. */
+/** Atomic PENDING -> EXECUTING transition for a send (external audit). Called
+ *  by the approval surface immediately before it starts constructing the tx.
+ *  Verifies the wallet/session binding, cancels the review TTL, drops the
+ *  persisted pending metadata so nothing can expire it mid-flight, records an
+ *  executing operation, and returns an unguessable execution token + a queryable
+ *  operationId. After this, only dappComplete/dappFail bearing the token settle
+ *  the request — neither timeout nor channel-loss can. */
+export async function dappBeginSend(
+  reqId: string
+): Promise<{ ok: true; executionToken: string; operationId: string } | { ok: false; error: string }> {
+  const live = pendingLive.get(reqId)
+  if (!live || live.method !== 'bdx_sendTransaction') {
+    return { ok: false, error: 'This request has expired — retry from the site.' }
+  }
+  if (live.executing && live.executionToken && live.operationId) {
+    // Idempotent begin (the surface retried): hand back the same token.
+    return { ok: true, executionToken: live.executionToken, operationId: live.operationId }
+  }
+  // Re-verify the immutable approval context right before execution.
+  const session = await getSession()
+  const activeId = await getActiveId()
+  if (!session || !activeId || activeId !== live.walletId || session.walletId !== live.walletId
+    || (live.sessionGeneration !== null && session.generation !== live.sessionGeneration)) {
+    return { ok: false, error: 'Wallet changed — review this request again' }
+  }
+  const executionToken = crypto.randomUUID()
+  const operationId = crypto.randomUUID()
+  const now = Date.now()
+  const idempotencyKey = (live.params as { idempotencyKey?: unknown } | undefined)?.idempotencyKey
+  const op: OperationRecord = {
+    operationId, executionToken, origin: live.origin, walletId: live.walletId,
+    state: 'executing', createdAt: now, updatedAt: now,
+    ...(typeof idempotencyKey === 'string' ? { idempotencyKey } : {})
+  }
+  await putOperation(op)
+  // Cancel the review timer and drop the persisted PENDING entry so the request
+  // can no longer be expired or re-shown; KEEP the live entry for the reply.
+  clearTimeout(live.timer)
+  live.executing = true
+  live.executionToken = executionToken
+  live.operationId = operationId
+  const persisted = (await sessionStore.get(PENDING_KEY))[PENDING_KEY] ?? {}
+  if (persisted[reqId]) { delete persisted[reqId]; await sessionStore.set({ [PENDING_KEY]: persisted }) }
+  notifyPanels()
+  return { ok: true, executionToken, operationId }
+}
+
+/** Send flow finished in the approval surface (panel/popup): persist the
+ *  broadcast outcome BEFORE attempting to reply, so a dead channel or SW
+ *  restart can't lose it (external audit). Requires the execution token. */
 export async function dappComplete(
-  reqId: string, result: { txHash: string; fee: string }
+  reqId: string,
+  args: { operationId: string; executionToken: string; result: { txHash: string; fee: string } }
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const all = (await sessionStore.get(PENDING_KEY))[PENDING_KEY] ?? {}
-  if (!all[reqId]) return { ok: false, error: 'Request no longer pending' }
-  settlePending(reqId, { result: { txHash: String(result.txHash), fee: String(result.fee ?? '0') } })
+  const ops = await getOperations()
+  const op = ops[args.operationId]
+  if (!op || op.executionToken !== args.executionToken) {
+    return { ok: false, error: 'Unknown or invalid operation' }
+  }
+  if (op.state === 'executing') {
+    op.state = 'confirmed'
+    op.txHash = String(args.result.txHash)
+    op.fee = String(args.result.fee ?? '0')
+    op.updatedAt = Date.now()
+    await putOperation(op) // outcome persisted FIRST
+  }
+  // Best-effort reply; the outcome is already durable and queryable via
+  // bdx_getOperationStatus if the channel is gone.
+  settlePending(reqId, { result: { txHash: op.txHash, fee: op.fee ?? '0', operationId: op.operationId } })
   await removePending(reqId)
   notifyPanels()
   return { ok: true }
@@ -1036,8 +1234,21 @@ export async function dappAuthSignComplete(
 }
 
 /** Send flow failed. The wire error is SANITIZED (spec §6) — the detailed
- *  reason stays in the wallet UI, never goes to the page. */
-export async function dappFail(reqId: string): Promise<{ ok: true }> {
+ *  reason stays in the wallet UI, never goes to the page. When the failure
+ *  happens AFTER beginSend, the operation is recorded as failed (so a retry
+ *  with the same idempotency key is permitted and a status query says so). */
+export async function dappFail(
+  reqId: string, args?: { operationId?: string; executionToken?: string }
+): Promise<{ ok: true }> {
+  if (args?.operationId && args.executionToken) {
+    const ops = await getOperations()
+    const op = ops[args.operationId]
+    if (op && op.executionToken === args.executionToken && op.state === 'executing') {
+      op.state = 'failed'
+      op.updatedAt = Date.now()
+      await putOperation(op)
+    }
+  }
   settlePending(reqId, { error: err(ERR.INTERNAL, 'transaction failed') })
   await removePending(reqId)
   notifyPanels()
@@ -1086,14 +1297,31 @@ export function initDappBridge(): void {
     if (!origin || origin === 'null') { port.disconnect(); return }
     const tabId = port.sender?.tab?.id
     ports.set(port, { origin, ...(tabId !== undefined ? { tabId } : {}) })
-    port.onDisconnect.addListener(() => ports.delete(port))
+    port.onDisconnect.addListener(() => {
+      ports.delete(port)
+      // External audit: a still-PENDING send/sign approval must not stay
+      // actionable once its page's channel is gone — approving it later could
+      // sign/broadcast for a page that will never receive the reply. Reject
+      // those; an EXECUTING send is untouched (its outcome is owned by the
+      // operation record), and connect stays (recoverable via the grant).
+      for (const [reqId, live] of pendingLive) {
+        if (live.owner !== port || live.executing) continue
+        if (live.method === 'bdx_sendTransaction' || live.method === 'bdx_signMessage'
+          || live.method === 'bdx_signAuthChallenge') {
+          settlePending(reqId, { error: err(ERR.INTERNAL, 'page disconnected — request cancelled') })
+          if (live.windowId !== undefined) chrome.windows.remove(live.windowId).catch(() => {})
+          removePending(reqId)
+          notifyPanels()
+        }
+      }
+    })
     port.onMessage.addListener((raw: unknown) => {
       // The content script already validated shape, but it is less trusted
       // than this process — validate again.
       const req = validatePortRequest(raw)
       if (!req) return
       const respond = (msg: DappPortMessage) => { try { port.postMessage(msg) } catch { /* gone */ } }
-      handleMethod(origin, req, respond, port.sender?.tab?.id, port.sender?.url).catch(() =>
+      handleMethod(origin, req, respond, port.sender?.tab?.id, port.sender?.url, port).catch(() =>
         respond({ id: req.id, error: err(ERR.INTERNAL, 'internal error') })
       )
     })

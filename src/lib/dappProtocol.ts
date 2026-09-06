@@ -24,8 +24,8 @@ export const ERR = {
 
 export const DAPP_METHODS = [
   'bdx_connect', 'bdx_disconnect', 'bdx_getAddress', 'bdx_getBalance',
-  'bdx_sendTransaction', 'bdx_signMessage', 'bdx_signAuthChallenge', 'bdx_verifyMessage',
-  'bdx_resolveBns', 'bdx_getNetwork', 'bdx_getState'
+  'bdx_sendTransaction', 'bdx_getOperationStatus', 'bdx_signMessage', 'bdx_signAuthChallenge',
+  'bdx_verifyMessage', 'bdx_resolveBns', 'bdx_getNetwork', 'bdx_getState'
 ] as const
 export type DappMethod = (typeof DAPP_METHODS)[number]
 

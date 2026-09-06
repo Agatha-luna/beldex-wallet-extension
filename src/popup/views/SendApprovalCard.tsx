@@ -127,7 +127,18 @@ export function SendApprovalCard({ reqId, origin, params, walletName, expect, on
     // Global single-flight send lock (shared with the panel's own send flow).
     const lock = await sendToBackground({ type: 'SEND_LOCK_ACQUIRE' })
     if (!lock.ok) { setError(lock.error); setPhase('review'); return }
+    // Atomic PENDING -> EXECUTING BEFORE any construction (external audit):
+    // this cancels the review timer and mints the execution token, so the
+    // transaction can no longer be terminated by an approval timeout while it
+    // broadcasts, and its outcome is recoverable if the channel dies.
+    let operationId = ''
+    let executionToken = ''
     try {
+      const begin = await sendToBackground({ type: 'DAPP_BEGIN_SEND', reqId })
+      if (!begin.ok) throw new Error(begin.error)
+      operationId = begin.operationId ?? ''
+      executionToken = begin.executionToken ?? ''
+
       // Bound fetch: fails if the wallet or session changed since this card
       // was rendered — the tx must be built with the DISPLAYED wallet's keys.
       const s = await sendToBackground({ type: 'GET_SECRETS', expect })
@@ -157,14 +168,22 @@ export function SendApprovalCard({ reqId, origin, params, walletName, expect, on
       // it, the raw LWS figures would collapse the dapp-visible balance to
       // zero until the panel's next correction pass.
       await publishCorrectedBalance(s.secrets).catch(() => {})
+      // Records the broadcast outcome (durable) before replying to the dapp.
       await sendToBackground({
-        type: 'DAPP_COMPLETE', reqId, result: { txHash: r.tx_hash, fee: String(paidFee) }
+        type: 'DAPP_COMPLETE', reqId, operationId, executionToken,
+        result: { txHash: r.tx_hash, fee: String(paidFee) }
       })
       setPhase('success')
     } catch (e: any) {
       // Full reason stays HERE in the wallet; the dapp gets a sanitized error.
       setError(e?.message ?? 'Transaction failed')
-      await sendToBackground({ type: 'DAPP_FAIL', reqId }).catch(() => {})
+      // Pass the token so a post-begin failure is recorded as failed (lets the
+      // dapp safely retry with the same idempotency key). Pre-begin failures
+      // have no token and are handled as before.
+      await sendToBackground({
+        type: 'DAPP_FAIL', reqId,
+        ...(operationId && executionToken ? { operationId, executionToken } : {})
+      }).catch(() => {})
       setPhase('failed')
     } finally {
       await sendToBackground({ type: 'SEND_LOCK_RELEASE' }).catch(() => {})

@@ -18,7 +18,7 @@ import { wireToolbarOpensPanel } from '../lib/platform'
 import { sessionStore } from '../lib/sessionStore'
 import {
   initDappBridge, dappGetPending, dappFirstPending, dappApprove, dappReject,
-  dappComplete, dappSignComplete, dappFail, dappSendLockAcquire, dappSendLockRelease,
+  dappBeginSend, dappComplete, dappSignComplete, dappFail, dappSendLockAcquire, dappSendLockRelease,
   dappListOrigins, dappRevokeOrigin, dappActiveTabSite, dappNotifyLocked, dappNotifyUnlocked,
   dappNotifyWalletSwitched, dappNotifyBalanceFromInfo, dappCleanupWallet,
   dappInvalidateOnSessionEnd, dappInvalidateForWallet, dappAuthSignComplete
@@ -455,8 +455,17 @@ async function handle(req: BgRequest): Promise<BgResponse> {
     case 'DAPP_REJECT':
       return dappReject(req.reqId)
 
+    case 'DAPP_BEGIN_SEND': {
+      const r = await dappBeginSend(req.reqId)
+      return r.ok
+        ? { ok: true, executionToken: r.executionToken, operationId: r.operationId }
+        : { ok: false, error: r.error }
+    }
+
     case 'DAPP_COMPLETE': {
-      const r = await dappComplete(req.reqId, req.result)
+      const r = await dappComplete(req.reqId, {
+        operationId: req.operationId, executionToken: req.executionToken, result: req.result
+      })
       // Refresh the cache promptly so balanceChanged reaches connected dapps.
       syncOnce().catch(() => {})
       return r.ok ? { ok: true } : { ok: false, error: r.error }
@@ -473,7 +482,7 @@ async function handle(req: BgRequest): Promise<BgResponse> {
     }
 
     case 'DAPP_FAIL':
-      return dappFail(req.reqId)
+      return dappFail(req.reqId, { operationId: req.operationId, executionToken: req.executionToken })
 
     case 'SEND_LOCK_ACQUIRE': {
       const r = await dappSendLockAcquire()
