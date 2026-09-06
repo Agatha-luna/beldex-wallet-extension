@@ -72,9 +72,14 @@ describe('bdx_signAuthChallenge dispatch', { skip: bundle ? false : 'no built bu
       tabs: { query: async () => [{ id: 1 }] },
       notifications: { create: () => {} }
     }
+    // Unref timers the BUNDLE arms (the 5-min approval-TTL setTimeout): a test
+    // may deliberately leave an approval pending, and a ref'd timer would keep
+    // the test runner alive after all tests finish. The tests' own waits use
+    // the outer setTimeout, so this only affects background-scheduled timers.
+    const unrefTimeout = (fn, ms, ...a) => { const t = setTimeout(fn, ms, ...a); t?.unref?.(); return t }
     const sandbox = {
       chrome, console, crypto: globalThis.crypto, TextEncoder, TextDecoder,
-      setTimeout, clearTimeout, setInterval, clearInterval,
+      setTimeout: unrefTimeout, clearTimeout, setInterval, clearInterval,
       fetch: async () => ({ ok: true, json: async () => ({}) }), URL
     }
     sandbox.self = sandbox

@@ -14,7 +14,7 @@
     "dev": "webpack --mode=development --watch",
     "dev:testnet": "webpack --mode=development --env network=testnet --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node --disallow-code-generation-from-strings --experimental-strip-types --test --test-force-exit test/*.test.mjs"
+    "test": "node --disallow-code-generation-from-strings --experimental-strip-types --test test/*.test.mjs"
   },
   "dependencies": {
     "@bdxi/beldex-app-bridge": "3.0.1",
