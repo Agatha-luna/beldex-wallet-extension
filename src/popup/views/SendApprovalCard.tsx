@@ -177,13 +177,19 @@ export function SendApprovalCard({ reqId, origin, params, walletName, expect, on
       setPhase('success')
     } catch (e: any) {
       // Full reason stays HERE in the wallet; the dapp gets a sanitized error.
-      setError(e?.message ?? 'Transaction failed')
-      // Pass the token so a post-begin failure is recorded as failed (lets the
-      // dapp safely retry with the same idempotency key). Pre-begin failures
-      // have no token and are handled as before.
+      const msg = e?.message ?? 'Transaction failed'
+      // A timeout once the SUBMIT step (code 5) has begun is an UNKNOWN outcome —
+      // the tx may have broadcast. Don't record the operation as failed (that
+      // would permit an idempotent retry / duplicate payment); leave it
+      // executing so the dapp must resolve it via bdx_getOperationStatus.
+      const unknownOutcome = /timed out|aborted/i.test(msg) && stepCode >= 5
+      if (unknownOutcome) setError('Transaction sent but its outcome is unconfirmed — check history before retrying.')
+      else setError(msg)
+      // Pass the token so a post-begin failure is recorded (failed, unless the
+      // outcome is unknown). Pre-begin failures have no token.
       await sendToBackground({
         type: 'DAPP_FAIL', reqId,
-        ...(operationId && executionToken ? { operationId, executionToken } : {})
+        ...(operationId && executionToken ? { operationId, executionToken, unknown: unknownOutcome } : {})
       }).catch(() => {})
       setPhase('failed')
     } finally {

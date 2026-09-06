@@ -43,7 +43,11 @@ export type BgRequest =
   | { type: 'DAPP_COMPLETE'; reqId: string; operationId: string; executionToken: string; result: { txHash: string; fee: string } }
   | { type: 'DAPP_SIGN_COMPLETE'; reqId: string; result: { signature: string; address: string } }
   | { type: 'DAPP_AUTH_SIGN_COMPLETE'; reqId: string; result: { message: string; signature: string; address: string } }
-  | { type: 'DAPP_FAIL'; reqId: string; operationId?: string; executionToken?: string }
+  // `unknown`: the send may have broadcast but its outcome is unknown (e.g. a
+  // timeout after submission began). The operation is left EXECUTING (not
+  // failed) so a retry can't create a duplicate payment — the dapp must resolve
+  // it via bdx_getOperationStatus. See the send operation state machine.
+  | { type: 'DAPP_FAIL'; reqId: string; operationId?: string; executionToken?: string; unknown?: boolean }
   | { type: 'SEND_LOCK_ACQUIRE' } // global one-send-at-a-time (panel + dapp)
   | { type: 'SEND_LOCK_RELEASE'; owner?: string } // only the matching owner releases
   | { type: 'DAPP_LIST_ORIGINS' }

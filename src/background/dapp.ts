@@ -1331,15 +1331,21 @@ export async function dappAuthSignComplete(
  *  happens AFTER beginSend, the operation is recorded as failed (so a retry
  *  with the same idempotency key is permitted and a status query says so). */
 export async function dappFail(
-  reqId: string, args?: { operationId?: string; executionToken?: string }
+  reqId: string, args?: { operationId?: string; executionToken?: string; unknown?: boolean }
 ): Promise<{ ok: true }> {
   if (args?.operationId && args.executionToken) {
     const ops = await getOperations()
     const op = ops[args.operationId]
     if (op && op.executionToken === args.executionToken && op.state === 'executing') {
-      op.state = 'failed'
-      op.updatedAt = Date.now()
-      await putOperation(op)
+      // UNKNOWN outcome (e.g. a submit-phase timeout): leave the operation
+      // EXECUTING so an idempotent retry is refused and bdx_getOperationStatus
+      // reports it as still in progress — the tx may have broadcast. Only a
+      // definite failure marks it 'failed' (which permits a retry).
+      if (!args.unknown) {
+        op.state = 'failed'
+        op.updatedAt = Date.now()
+        await putOperation(op)
+      }
     }
   }
   settlePending(reqId, { error: err(ERR.INTERNAL, 'transaction failed') })

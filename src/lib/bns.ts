@@ -20,6 +20,7 @@
 //   removes the third-party trust.
 
 import { CONFIG } from './config'
+import { fetchJson, HTTP } from './http'
 
 // starts alphanumeric, alphanumeric/hyphen/underscore inside, optional .bdx suffix
 const NAME_RE = /^[a-z0-9](?:[a-z0-9-_]*[a-z0-9])?(\.bdx)?$/
@@ -35,9 +36,9 @@ export function looksLikeBnsName(input: string): boolean {
 interface LookupResult { registered: boolean; wallet: string }
 
 async function lookup(name: string): Promise<LookupResult> {
-  const res = await fetch(`${CONFIG.BNS_LOOKUP_URL}?name=${encodeURIComponent(name)}`)
-  if (!res.ok) throw new Error(`lookup ${res.status}`)
-  const json = await res.json()
+  const json = await fetchJson<any>(
+    `${CONFIG.BNS_LOOKUP_URL}?name=${encodeURIComponent(name)}`, {}, HTTP.BNS
+  )
   if (json?.status !== 'ok') throw new Error('lookup failed')
   return {
     registered: json?.bnsData?.available === false,

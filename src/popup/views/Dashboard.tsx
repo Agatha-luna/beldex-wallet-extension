@@ -86,8 +86,14 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
   const [hashCopied, setHashCopied] = useState(false)
   const copyTimer = useRef<ReturnType<typeof setTimeout>>()
   const secretsRef = useRef<WalletSecrets | null>(null)
+  // Single-flight guard (external audit): the 10s poll must not start a second
+  // refresh while one is still in flight — a slow/hanging LWS would otherwise
+  // accumulate overlapping fetches. Each fetch is also bounded by its deadline.
+  const refreshInFlight = useRef(false)
 
   const refresh = async (c: lws.Credentials) => {
+    if (refreshInFlight.current) return
+    refreshInFlight.current = true
     setRefreshing(true)
     getBdxPriceUsdt().then(p => p !== null && setPrice(p)) // 60s-cached; fire-and-forget
     try {
@@ -147,6 +153,7 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
     } catch (e: any) {
       setError(`rpc node unreachable (${e.message}) — retrying…`)
     } finally {
+      refreshInFlight.current = false
       setRefreshing(false)
       setLoadedOnce(true)
     }

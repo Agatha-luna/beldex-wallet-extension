@@ -20,6 +20,15 @@
 - A still-pending send / sign / sign-in approval is now cancelled when its
   page's message channel disconnects (connect approvals stay, being recoverable
   via the persisted grant).
+- **Bounded backend calls + polling single-flight** — all LWS/BNS/price fetches
+  go through a shared wrapper (`src/lib/http.ts`) with an AbortController
+  deadline and a response-size budget (Content-Length check + bounded streaming
+  read), so a slow-drip/hanging/oversized backend can't keep a call alive or
+  accumulate memory. The dashboard 10s poll and the background 30s sync each
+  refuse to start while one is already in flight. A raw-tx submit gets a long
+  deadline (aborting a broadcast early manufactures ambiguity); a submit-phase
+  timeout is treated as an UNKNOWN outcome (operation left executing, no
+  auto-retry) per the send state machine, not a definite failure.
 - **Serialized security-critical state updates** — the send lock, pending-approval
   admission, and grant-map updates now run under in-worker mutexes so two
   interleaved message handlers can't both pass a check-then-write. The send lock

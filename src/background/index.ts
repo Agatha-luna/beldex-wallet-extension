@@ -190,10 +190,17 @@ async function touchAutoLock() {
 
 // ---- background sync ----------------------------------------------------------
 
+// Single-flight guard (external audit): the 30s alarm must not start a second
+// sync while one is still in flight (a slow/hanging LWS would otherwise let
+// overlapping fetches accumulate). Bounded regardless by the fetch deadline.
+let syncInFlight = false
+
 async function syncOnce(): Promise<void> {
+  if (syncInFlight) return
   const session = await getSession()
   if (!session) { chrome.alarms.clear(ALARM_SYNC); return }
   const s = session.secrets
+  syncInFlight = true
   try {
     const info = await lws.getAddressInfo({ address: s.address, view_key: s.secViewKey })
     const prevCache = (await sessionStore.get(CACHE_KEY))[CACHE_KEY]
@@ -231,6 +238,8 @@ async function syncOnce(): Promise<void> {
     }
   } catch {
     // network/LWS hiccup — next alarm will retry
+  } finally {
+    syncInFlight = false
   }
 }
 
@@ -482,7 +491,9 @@ async function handle(req: BgRequest): Promise<BgResponse> {
     }
 
     case 'DAPP_FAIL':
-      return dappFail(req.reqId, { operationId: req.operationId, executionToken: req.executionToken })
+      return dappFail(req.reqId, {
+        operationId: req.operationId, executionToken: req.executionToken, unknown: req.unknown
+      })
 
     case 'SEND_LOCK_ACQUIRE': {
       const r = await dappSendLockAcquire()
