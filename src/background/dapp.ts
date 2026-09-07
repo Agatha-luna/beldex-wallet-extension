@@ -55,14 +55,12 @@ interface PendingLive extends PendingMeta {
   pageReqId: string
   respond: (msg: DappPortMessage) => void
   timer: ReturnType<typeof setTimeout>
-  windowId?: number
 }
 
 // ---- state (service-worker lifetime) ---------------------------------------
 
 const ports = new Map<chrome.runtime.Port, { origin: string; tabId?: number }>()
 const pendingLive = new Map<string, PendingLive>()   // reqId -> live approval
-const windowToReq = new Map<number, string>()
 const readStamps = new Map<string, number[]>()       // origin -> request times
 
 // ---- small wallet-store readers (same keys as background/index.ts) ---------
@@ -375,7 +373,6 @@ async function removePending(reqId: string): Promise<PendingMeta | null> {
   const live = pendingLive.get(reqId)
   if (live) {
     clearTimeout(live.timer)
-    if (live.windowId !== undefined) windowToReq.delete(live.windowId)
     pendingLive.delete(reqId)
   }
   return meta
@@ -411,56 +408,46 @@ async function panelIsOpen(): Promise<boolean> {
   return false
 }
 
+/** Methods that can end up needing an approval UI. */
+const APPROVAL_METHODS = new Set<DappMethod>(['bdx_connect', 'bdx_sendTransaction', 'bdx_signMessage'])
+
 /**
- * Surface an approval request to the user. Preferred: inside the wallet's
- * side panel (panel shows the request via DAPP_LIST_PENDING). Fallbacks, in
- * order: open the side panel programmatically (works when the browser still
- * honors the user's click gesture), else a standalone popup window.
+ * Start opening the side panel — call this SYNCHRONOUSLY, with no `await`
+ * anywhere between the triggering port message and this call, or Chrome
+ * silently drops the request ("may only be called in response to a user
+ * gesture"). We don't yet know whether the request will actually need an
+ * approval UI (e.g. bdx_connect might be pre-granted) — by the time the
+ * async grant/lock checks in handleMethod finish, the gesture window is
+ * long gone, so we speculatively fire this immediately for every
+ * APPROVAL_METHODS call and only look at the result once we know an
+ * approval UI is actually needed. Worst case for a pre-granted reconnect:
+ * the panel opens showing the wallet with nothing pending — harmless.
  */
-async function openApproval(reqId: string, tabId?: number): Promise<void> {
-  if (await panelIsOpen()) { notifyPanels(); return }
-
-  try {
-    // Chrome: needs the "sidePanel" permission and (usually) a user gesture.
-    if (anyChrome.sidePanel?.open && tabId !== undefined) {
-      await anyChrome.sidePanel.open({ tabId })
-      notifyPanels()
-      return
-    }
-  } catch { /* gesture not honored — fall back */ }
-  try {
-    if (anyChrome.sidebarAction?.open) { // Firefox
-      await anyChrome.sidebarAction.open()
-      notifyPanels()
-      return
-    }
-  } catch { /* fall back */ }
-
-  // Anchor the popup to the TOP-RIGHT of the user's browser window (like
-  // MetaMask) — computed from the focused window's geometry, no extra
-  // permissions needed. Falls back to the browser's default placement.
-  const WIDTH = 400
-  const HEIGHT = 640
-  let position: { left: number; top: number } | undefined
-  try {
-    const focused = await chrome.windows.getLastFocused()
-    if (typeof focused.left === 'number' && typeof focused.width === 'number') {
-      position = {
-        left: Math.max(0, focused.left + focused.width - WIDTH - 16),
-        top: Math.max(0, (focused.top ?? 0) + 80)
-      }
-    }
-  } catch { /* default placement */ }
-
-  const win = await chrome.windows.create({
-    url: chrome.runtime.getURL(`approval.html?reqId=${encodeURIComponent(reqId)}`),
-    type: 'popup', width: WIDTH, height: HEIGHT, focused: true, ...position
-  })
-  const live = pendingLive.get(reqId)
-  if (live && win.id !== undefined) {
-    live.windowId = win.id
-    windowToReq.set(win.id, reqId)
+function trySidePanelOpen(tabId: number): Promise<boolean> {
+  if (anyChrome.sidePanel?.open) {
+    return anyChrome.sidePanel.open({ tabId }).then(() => true).catch(() => false)
   }
+  if (anyChrome.sidebarAction?.open) { // Firefox
+    return anyChrome.sidebarAction.open().then(() => true).catch(() => false)
+  }
+  return Promise.resolve(false)
+}
+
+/**
+ * Surface an approval request to the user inside the wallet's side panel
+ * (panel shows the request via DAPP_LIST_PENDING). `panelOpenAttempt` is the
+ * (already in-flight) result of trySidePanelOpen, started synchronously back
+ * when the port message first arrived — we just await it here. No
+ * popup-window fallback: if the panel couldn't be opened, the caller
+ * (queueApproval) rejects the request and asks the user to open the wallet
+ * themselves, so approvals never appear in a surprise new window.
+ *
+ * @returns true if the request is now visible somewhere the user will see it.
+ */
+async function openApproval(panelOpenAttempt: Promise<boolean> | null): Promise<boolean> {
+  if (await panelIsOpen()) { notifyPanels(); return true }
+  if (panelOpenAttempt && await panelOpenAttempt) { notifyPanels(); return true }
+  return false
 }
 
 // ---- method handlers --------------------------------------------------------
@@ -469,7 +456,7 @@ async function handleMethod(
   origin: string,
   req: DappPortRequest,
   respond: (msg: DappPortMessage) => void,
-  tabId?: number
+  panelOpenAttempt: Promise<boolean> | null = null
 ): Promise<void> {
   const reply = (result: unknown) => respond({ id: req.id, result })
   const fail = (e: { code: number; message: string }) => respond({ id: req.id, error: e })
@@ -551,7 +538,7 @@ async function handleMethod(
       for (const p of pendingLive.values()) {
         if (p.origin === origin) return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
-      await queueApproval(origin, req.method, undefined, req.id, respond, tabId)
+      await queueApproval(origin, req.method, undefined, req.id, respond, panelOpenAttempt)
       return // settled later by DAPP_APPROVE / DAPP_REJECT / window close / TTL
     }
 
@@ -566,7 +553,7 @@ async function handleMethod(
         if (p.method === 'bdx_sendTransaction') return fail(err(ERR.INTERNAL, 'transaction already in progress'))
         if (p.origin === origin) return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
-      await queueApproval(origin, req.method, v.send as unknown as object, req.id, respond, tabId)
+      await queueApproval(origin, req.method, v.send as unknown as object, req.id, respond, panelOpenAttempt)
       return // settled by DAPP_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
     }
 
@@ -580,7 +567,7 @@ async function handleMethod(
       for (const p of pendingLive.values()) {
         if (p.origin === origin) return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
-      await queueApproval(origin, req.method, { message: v.message }, req.id, respond, tabId)
+      await queueApproval(origin, req.method, { message: v.message }, req.id, respond, panelOpenAttempt)
       return // settled by DAPP_SIGN_COMPLETE / DAPP_FAIL / DAPP_REJECT / close / TTL
     }
 
@@ -613,7 +600,7 @@ async function queueApproval(
   params: object | undefined,
   pageReqId: string,
   respond: (msg: DappPortMessage) => void,
-  tabId?: number
+  panelOpenAttempt: Promise<boolean> | null
 ): Promise<void> {
   const reqId = crypto.randomUUID()
   const meta: PendingMeta = {
@@ -621,14 +608,19 @@ async function queueApproval(
   }
   const timer = setTimeout(async () => {
     settlePending(reqId, { error: err(ERR.EXPIRED, 'approval expired') })
-    const live = pendingLive.get(reqId)
     await removePending(reqId)
-    if (live?.windowId !== undefined) chrome.windows.remove(live.windowId).catch(() => {})
     notifyPanels()
   }, APPROVAL_TTL_MS)
   pendingLive.set(reqId, { ...meta, pageReqId, respond, timer })
   await persistPending(reqId, meta)
-  await openApproval(reqId, tabId)
+
+  const shown = await openApproval(panelOpenAttempt)
+  if (!shown) {
+    settlePending(reqId, {
+      error: err(ERR.PANEL_CLOSED, 'Open the Beldex Wallet extension (click its icon in your browser toolbar), then try again.')
+    })
+    await removePending(reqId)
+  }
 }
 
 // ---- internal messages from the approval UI / Settings ----------------------
@@ -776,19 +768,18 @@ export function initDappBridge(): void {
       // than this process — validate again.
       const req = validatePortRequest(raw)
       if (!req) return
+
+      // Must happen in this same synchronous tick — see trySidePanelOpen's
+      // doc comment. Any `await` before this line and Chrome drops the gesture.
+      const panelOpenAttempt = APPROVAL_METHODS.has(req.method) && tabId !== undefined
+        ? trySidePanelOpen(tabId)
+        : null
+
       const respond = (msg: DappPortMessage) => { try { port.postMessage(msg) } catch { /* gone */ } }
-      handleMethod(origin, req, respond, port.sender?.tab?.id).catch(() =>
+      handleMethod(origin, req, respond, panelOpenAttempt).catch(() =>
         respond({ id: req.id, error: err(ERR.INTERNAL, 'internal error') })
       )
     })
-  })
-
-  // Approval window closed without a decision = user rejection (spec §7.4).
-  chrome.windows.onRemoved.addListener(windowId => {
-    const reqId = windowToReq.get(windowId)
-    if (!reqId) return
-    settlePending(reqId, { error: err(ERR.USER_REJECTED, 'user rejected') })
-    removePending(reqId)
   })
 }
 

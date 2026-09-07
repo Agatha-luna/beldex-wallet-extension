@@ -49,7 +49,7 @@
       .wrap {
         padding: 18px; max-width: 440px; margin: 0 auto;
         display: flex; flex-direction: column;
-        height: 100vh; overflow-y: auto;
+        height: 100vh; overflow-y: auto; overflow-x: hidden;
       }
       body.tab-mode .wrap { max-width: 560px; }
       /* history gets exactly the vertical space left on screen; its own content scrolls */
@@ -61,21 +61,32 @@
 
       .header {
         display: flex; align-items: center; justify-content: space-between;
+        flex-wrap: wrap; gap: 8px; min-width: 0;
         margin-bottom: 16px; padding-bottom: 14px;
         border-bottom: 1px solid var(--border);
       }
       .brand {
-        display: flex; align-items: center; gap: 10px;
-        font-family: var(--display); font-size: 14px; letter-spacing: 1px;
+        display: flex; align-items: center; gap: 5px;
+        font-family: var(--display); font-size: 11px; letter-spacing: 0.5px;
         text-transform: uppercase;
+        flex: 0 1 auto; min-width: 0;
       }
-      .brand img { width: 26px; height: 26px; display: block; }
+      .header-actions {
+        display: flex; align-items: center; gap: 4px;
+        flex: 0 1 auto; min-width: 0;
+      }
+      .header-actions .btn-icon { padding: 3px 7px; font-size: 11px; }
+      .btn-wallet-switch {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        max-width: 80px;
+      }
+      .brand img { width: clamp(18px, 5vw, 26px); height: clamp(18px, 5vw, 26px); display: block; }
       .brand.lg { flex-direction: column; gap: 12px; font-size: 18px; }
       .brand.lg img { width: 56px; height: 56px; }
       /* Shown only on non-mainnet builds (see Dashboard header). */
       .net-badge {
-        font-family: var(--display); font-size: 8px; letter-spacing: 1px;
-        padding: 3px 6px; border: 1px solid #E8A33D; color: #E8A33D;
+        font-family: var(--display); font-size: 7px; letter-spacing: 0.5px;
+        padding: 2px 5px; border: 1px solid #E8A33D; color: #E8A33D;
         border-radius: 3px; line-height: 1;
       }
 

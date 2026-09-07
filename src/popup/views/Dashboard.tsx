@@ -370,8 +370,8 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
               and mainnet wallet is an easy and expensive mistake to make. */}
           {CONFIG.NETWORK !== 'mainnet' && <span className="net-badge">{CONFIG.NETWORK_LABEL}</span>}
         </div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button className="btn-icon" title="Switch wallet" onClick={() => setShowWallets(true)}>
+        <div className="header-actions">
+          <button className="btn-icon btn-wallet-switch" title="Switch wallet" onClick={() => setShowWallets(true)}>
             {walletName || 'Wallet'} ▾
           </button>
           {!new URLSearchParams(location.search).has('tab') && (
