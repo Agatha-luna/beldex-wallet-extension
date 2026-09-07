@@ -55,12 +55,14 @@ interface PendingLive extends PendingMeta {
   pageReqId: string
   respond: (msg: DappPortMessage) => void
   timer: ReturnType<typeof setTimeout>
+  windowId?: number
 }
 
 // ---- state (service-worker lifetime) ---------------------------------------
 
 const ports = new Map<chrome.runtime.Port, { origin: string; tabId?: number }>()
 const pendingLive = new Map<string, PendingLive>()   // reqId -> live approval
+const windowToReq = new Map<number, string>()
 const readStamps = new Map<string, number[]>()       // origin -> request times
 
 // ---- small wallet-store readers (same keys as background/index.ts) ---------
@@ -373,6 +375,7 @@ async function removePending(reqId: string): Promise<PendingMeta | null> {
   const live = pendingLive.get(reqId)
   if (live) {
     clearTimeout(live.timer)
+    if (live.windowId !== undefined) windowToReq.delete(live.windowId)
     pendingLive.delete(reqId)
   }
   return meta
@@ -434,20 +437,50 @@ function trySidePanelOpen(tabId: number): Promise<boolean> {
 }
 
 /**
- * Surface an approval request to the user inside the wallet's side panel
- * (panel shows the request via DAPP_LIST_PENDING). `panelOpenAttempt` is the
- * (already in-flight) result of trySidePanelOpen, started synchronously back
- * when the port message first arrived — we just await it here. No
- * popup-window fallback: if the panel couldn't be opened, the caller
- * (queueApproval) rejects the request and asks the user to open the wallet
- * themselves, so approvals never appear in a surprise new window.
+ * Surface an approval request to the user. Preferred: inside the wallet's
+ * side panel (panel shows the request via DAPP_LIST_PENDING) — `panelOpenAttempt`
+ * is the (already in-flight) result of trySidePanelOpen, started synchronously
+ * back when the port message first arrived; we just await it here. If that
+ * didn't get the panel open (no permission, unsupported browser, or the
+ * gesture didn't carry through), fall back to a standalone popup window so
+ * the request still has *some* surface instead of failing outright.
  *
  * @returns true if the request is now visible somewhere the user will see it.
  */
-async function openApproval(panelOpenAttempt: Promise<boolean> | null): Promise<boolean> {
+async function openApproval(reqId: string, panelOpenAttempt: Promise<boolean> | null): Promise<boolean> {
   if (await panelIsOpen()) { notifyPanels(); return true }
   if (panelOpenAttempt && await panelOpenAttempt) { notifyPanels(); return true }
-  return false
+
+  // Anchor the popup to the TOP-RIGHT of the user's browser window (like
+  // MetaMask) — computed from the focused window's geometry, no extra
+  // permissions needed. Falls back to the browser's default placement.
+  const WIDTH = 400
+  const HEIGHT = 640
+  let position: { left: number; top: number } | undefined
+  try {
+    const focused = await chrome.windows.getLastFocused()
+    if (typeof focused.left === 'number' && typeof focused.width === 'number') {
+      position = {
+        left: Math.max(0, focused.left + focused.width - WIDTH - 16),
+        top: Math.max(0, (focused.top ?? 0) + 80)
+      }
+    }
+  } catch { /* default placement */ }
+
+  try {
+    const win = await chrome.windows.create({
+      url: chrome.runtime.getURL(`approval.html?reqId=${encodeURIComponent(reqId)}`),
+      type: 'popup', width: WIDTH, height: HEIGHT, focused: true, ...position
+    })
+    const live = pendingLive.get(reqId)
+    if (live && win.id !== undefined) {
+      live.windowId = win.id
+      windowToReq.set(win.id, reqId)
+    }
+    return true
+  } catch {
+    return false
+  }
 }
 
 // ---- method handlers --------------------------------------------------------
@@ -608,13 +641,15 @@ async function queueApproval(
   }
   const timer = setTimeout(async () => {
     settlePending(reqId, { error: err(ERR.EXPIRED, 'approval expired') })
+    const live = pendingLive.get(reqId)
     await removePending(reqId)
+    if (live?.windowId !== undefined) chrome.windows.remove(live.windowId).catch(() => {})
     notifyPanels()
   }, APPROVAL_TTL_MS)
   pendingLive.set(reqId, { ...meta, pageReqId, respond, timer })
   await persistPending(reqId, meta)
 
-  const shown = await openApproval(panelOpenAttempt)
+  const shown = await openApproval(reqId, panelOpenAttempt)
   if (!shown) {
     settlePending(reqId, {
       error: err(ERR.PANEL_CLOSED, 'Open the Beldex Wallet extension (click its icon in your browser toolbar), then try again.')
@@ -780,6 +815,14 @@ export function initDappBridge(): void {
         respond({ id: req.id, error: err(ERR.INTERNAL, 'internal error') })
       )
     })
+  })
+
+  // Approval popup window closed without a decision = user rejection (spec §7.4).
+  chrome.windows.onRemoved.addListener(windowId => {
+    const reqId = windowToReq.get(windowId)
+    if (!reqId) return
+    settlePending(reqId, { error: err(ERR.USER_REJECTED, 'user rejected') })
+    removePending(reqId)
   })
 }
 
