@@ -20,7 +20,8 @@ import * as lws from '../lib/lws'
 import { resolveBnsWallet, looksLikeBnsName } from '../lib/bns'
 import { sessionStore } from '../lib/sessionStore'
 import {
-  DappEvent, DappMethod, DappPortMessage, DappPortRequest, ERR, PORT_NAME, PROTOCOL_VERSION
+  DappEvent, DappMethod, DappPortMessage, DappPortRequest, ERR, PORT_NAME, PROTOCOL_VERSION,
+  validatePortMessage
 } from '../lib/dappProtocol'
 // Pure arithmetic (@noble), no WASM and no window — safe in the service worker.
 import { addressSpendKey, verifyMessage } from '../lib/signMessage'
@@ -1434,9 +1435,11 @@ export function initDappBridge(): void {
       }
     })
     port.onMessage.addListener((raw: unknown) => {
-      // The content script already validated shape, but it is less trusted
-      // than this process — validate again.
-      const req = validatePortRequest(raw)
+      // The content script already validated + bounded the payload, but it is
+      // less trusted than this process — re-apply the SAME per-method schema
+      // authoritatively here (external audit), rejecting oversized/unknown/
+      // deeply-nested params before any handler or crypto work.
+      const req = validatePortMessage(raw)
       if (!req) return
       const respond = (msg: DappPortMessage) => { try { port.postMessage(msg) } catch { /* gone */ } }
       handleMethod(origin, req, respond, port.sender?.tab?.id, port.sender?.url, port).catch(() =>
@@ -1458,13 +1461,3 @@ function safeOrigin(url: string): string | null {
   try { return new URL(url).origin } catch { return null }
 }
 
-function validatePortRequest(raw: unknown): DappPortRequest | null {
-  if (typeof raw !== 'object' || raw === null) return null
-  const m = raw as Record<string, unknown>
-  if (typeof m.id !== 'string' || m.id.length === 0 || m.id.length > 128) return null
-  if (typeof m.method !== 'string') return null
-  if (m.params !== undefined && (typeof m.params !== 'object' || m.params === null || Array.isArray(m.params))) return null
-  const req: DappPortRequest = { id: m.id, method: m.method as DappMethod }
-  if (m.params !== undefined) req.params = m.params as object
-  return req
-}

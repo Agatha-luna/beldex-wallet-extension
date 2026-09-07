@@ -127,11 +127,22 @@ describe('bdx_signAuthChallenge dispatch', { skip: bundle ? false : 'no built bu
     assert.equal(sentToPage.at(-1)?.error?.code, 4900)
   })
 
-  test('invalid params -> -32602', async () => {
+  test('invalid params (bad nonce) -> -32602', async () => {
+    // A well-formed-but-invalid nonce reaches the handler and returns -32602.
+    // (An injected unknown field like `domain` would instead be dropped at the
+    // boundary schema before dispatch — covered in dapp-protocol.test.mjs.)
     reseed()
-    onConnect({ id: 'p1', method: 'bdx_signAuthChallenge', params: { nonce: 'bad space', domain: 'evil.com' } })
+    onConnect({ id: 'p1', method: 'bdx_signAuthChallenge', params: { nonce: 'bad space' } })
     await settle()
     assert.equal(sentToPage.at(-1)?.error?.code, -32602)
+  })
+
+  test('an injected unknown param field is dropped at the boundary (no dispatch)', async () => {
+    reseed()
+    sentToPage.length = 0
+    onConnect({ id: 'p1', method: 'bdx_signAuthChallenge', params: { nonce: 'server-nonce-1', domain: 'evil.com' } })
+    await settle()
+    assert.equal(sentToPage.find(m => m.id === 'p1'), undefined, 'unknown-field request must be dropped, not dispatched')
   })
 
   test('statement embeds the wallet-observed origin; page cannot override; concurrent -> -32603', async () => {

@@ -127,14 +127,16 @@ describe('dapp wire conformance', { skip: bundle ? false : 'no built bundle — 
     assert.equal(g.result.state, 'unlocked', 'granted origin sees the true state')
   })
 
-  test('keyless reads need no grant; unknown methods are METHOD_NOT_FOUND', async () => {
+  test('keyless reads need no grant; unknown methods are dropped at the port', async () => {
     seed({ grant: false })
     const net = await call('bdx_getNetwork')
     assert.ok(net.result, 'bdx_getNetwork is open')
-    // The content script pre-filters by DAPP_METHODS, but the background port
-    // re-validates only shape and routes unknown methods to the default case,
-    // which returns METHOD_NOT_FOUND (-32601) — defense in depth, not silence.
+    // The background port now authoritatively re-validates the method against
+    // DAPP_METHODS (external audit), so an unknown method is dropped BEFORE
+    // dispatch — no reply at all (stronger than the old default-case
+    // METHOD_NOT_FOUND, which stays reachable only for a KNOWN-but-unhandled
+    // method that passes the schema).
     const unknown = await call('bdx_notARealMethod')
-    assert.equal(unknown?.error?.code, -32601, 'unknown methods return METHOD_NOT_FOUND')
+    assert.equal(unknown, undefined, 'unknown methods are not routed')
   })
 })

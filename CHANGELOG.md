@@ -20,6 +20,14 @@
 - A still-pending send / sign / sign-in approval is now cancelled when its
   page's message channel disconnects (connect approvals stay, being recoverable
   via the persisted grant).
+- **Per-method payload bounding at the extension boundary** — every dApp method
+  now has a parameter schema enforced in the content script (before forwarding
+  over the port) and re-enforced authoritatively in the background. Only
+  recognized fields are copied into a fresh object, with per-field type and
+  length caps; unknown/extra fields, prototype-pollution keys, params on
+  no-parameter methods, oversized strings, and unknown methods are rejected
+  before any structured-clone, base58, or Keccak work. `verifyMessage` /
+  `addressSpendKey` also gained defensive length caps.
 - **Sign-message filter now covers all default-ignorable Unicode** — the
   `bdx_signMessage` / `bdx_signAuthChallenge` visual-integrity denylist was
   extended from a hand-picked set to whole Unicode classes: the full

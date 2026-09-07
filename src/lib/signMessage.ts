@@ -213,6 +213,11 @@ export function checkSignature(prefixHash: Uint8Array, pub: Uint8Array, sig: Uin
 
 /** Verify a "SigV1…" signature over `message` against a spend public key. */
 export function verifyMessage(message: string, pubSpendKey: string, signature: string): boolean {
+  // Defense in depth (external audit): bound work before Keccak/base58 even if
+  // a caller bypasses the dapp-bridge boundary schema. A real SigV1 is ~100
+  // chars and challenges are short; these caps are generous.
+  if (typeof message !== 'string' || message.length > 65_536) return false
+  if (typeof signature !== 'string' || signature.length > 4096) return false
   const sig = signature.trim()
   if (!sig.startsWith(SIG_MAGIC)) return false
   let raw: Uint8Array
@@ -233,6 +238,9 @@ export function verifyMessage(message: string, pubSpendKey: string, signature: s
 // the Emscripten glue cannot load.
 
 export function addressSpendKey(address: string): string | null {
+  // Bound base58 work before decoding (external audit). Real addresses are
+  // ~95-110 chars; anything far beyond that is not an address.
+  if (typeof address !== 'string' || address.length > 512) return null
   let raw: Uint8Array
   try {
     raw = base58Decode(address.trim())
