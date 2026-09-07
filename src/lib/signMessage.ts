@@ -181,10 +181,23 @@ export function checkSignature(prefixHash: Uint8Array, pub: Uint8Array, sig: Uin
   if (prefixHash.length !== 32 || pub.length !== 32 || sig.length !== 64) return false
   let A
   try {
-    A = ed25519.ExtendedPoint.fromHex(pub)
+    A = ed25519.ExtendedPoint.fromHex(pub) // rejects off-curve / non-canonical encodings
   } catch {
     return false // not a curve point
   }
+  // WEAK-KEY REJECTION (external audit). An ownership proof must establish
+  // knowledge of a secret spend scalar. For the identity point A=O, the verify
+  // equation c·A + r·G reduces to r·G, so an attacker picks r, derives the
+  // challenge, and forges an accepted proof with no secret. Any point carrying
+  // a torsion (small-order) component similarly weakens the required
+  // discrete-log assumption. Require A to be the identity's opposite: a
+  // non-identity point in the prime-order subgroup (torsion-free). A genuine
+  // wallet key a·G (a∈[1,ℓ)) always satisfies this, so honest verification is
+  // unaffected. The signer's zero-scalar checks cannot protect a *public*
+  // verifier handed an attacker-chosen key, so the gate must live here.
+  if (A.equals(ed25519.ExtendedPoint.ZERO)) return false // identity
+  if (!A.isTorsionFree()) return false                   // small-order / mixed-order component
+
   const c = bytesToNumberLE(sig.subarray(0, 32))
   const r = bytesToNumberLE(sig.subarray(32))
   if (c >= L || r >= L || c === 0n) return false // sc_check + sc_isnonzero

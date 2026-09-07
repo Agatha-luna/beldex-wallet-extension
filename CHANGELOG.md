@@ -20,6 +20,11 @@
 - A still-pending send / sign / sign-in approval is now cancelled when its
   page's message channel disconnects (connect approvals stay, being recoverable
   via the persisted grant).
+- **Message-verification weak-key rejection** — `checkSignature` (behind
+  `bdx_verifyMessage`) now rejects the Ed25519 identity point and any
+  torsion/small-order spend key before the signature equation. Such keys let an
+  attacker construct an accepted ownership proof with no secret; a genuine
+  prime-order wallet key is unaffected.
 - **Bounded backend calls + polling single-flight** — all LWS/BNS/price fetches
   go through a shared wrapper (`src/lib/http.ts`) with an AbortController
   deadline and a response-size budget (Content-Length check + bounded streaming
