@@ -502,21 +502,41 @@ export function validateSendParams(params: unknown): { ok: true; send: Validated
  *  card can show ALL of it — the user must never approve text they cannot see. */
 const MAX_SIGN_MESSAGE = 512
 
-/** Characters that could make the approval card RENDER differently from the
- *  logical bytes the user signs:
- *  - \x00-\x1f, \x7f     ASCII control (newlines, terminal escapes)
- *  - \u00ad               soft hyphen (invisible)
- *  - \u200b-\u200f       zero-width space/joiners + LRM/RLM direction marks
- *  - \u2028, \u2029      Unicode line/paragraph separators
- *  - \u202a-\u202e       bidi embeddings/overrides (LRE/RLE/PDF/LRO/RLO —
- *                        RLO can visually reverse "attacker" into innocuous text)
- *  - \u2060-\u2064       word joiner + invisible operators
- *  - \u2066-\u2069       bidi isolates (LRI/RLI/FSI/PDI)
- *  - \ufeff               zero-width no-break space / BOM
- *  The user must see exactly what they sign, so these are rejected outright. */
+/** Code points that could make the approval card RENDER differently from the
+ *  logical bytes the user signs. The invariant is strict — the user must see
+ *  exactly what they sign — so instead of a hand-picked list this rejects whole
+ *  Unicode *classes* that are invisible, ignorable, direction-controlling, or
+ *  ill-formed. Ranges are code points (the `u` flag), so astral characters
+ *  (variation-selector supplements, tags) are covered too. Pinned to the
+ *  Unicode 15.1 Default_Ignorable_Code_Point set; revisit on a UCD bump.
+ *
+ *  Covered classes:
+ *  - C0 / DEL / C1 controls (\\u0000-\\u001f, \\u007f-\\u009f)
+ *  - Default_Ignorable_Code_Point: soft hyphen, CGJ, ARABIC LETTER MARK
+ *      (\\u061c), Hangul fillers, Khmer inherent vowels, Mongolian FVS/MVS,
+ *      zero-width + LRM/RLM, bidi embeddings/overrides, word joiner /
+ *      invisible operators / bidi isolates AND the deprecated format controls
+ *      (all of \\u2060-\\u206f), variation selectors (\\ufe00-\\ufe0f incl. VS16
+ *      \\ufe0f) and their supplement (\\u{e0100}-\\u{e01ef}), tags
+ *      (\\u{e0000}-\\u{e007f}), BOM, reserved, shorthand/musical format controls
+ *  - line / paragraph separators (\\u2028, \\u2029)
+ *  - noncharacters: \\ufdd0-\\ufdef and U+FFFE/U+FFFF of every plane
+ *  - lone (unpaired) surrogates (\\ud800-\\udfff) */
 // eslint-disable-next-line no-control-regex
-const DISALLOWED_SIGN_CHARS =
-  /[\x00-\x1f\x7f\u00ad\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/
+const DISALLOWED_SIGN_CHARS = new RegExp('[' + [
+  '\\u0000-\\u001f\\u007f-\\u009f',
+  '\\u00ad\\u034f\\u061c\\u115f\\u1160\\u17b4\\u17b5\\u180b-\\u180f',
+  '\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2060-\\u206f',
+  '\\u3164\\ufe00-\\ufe0f\\ufeff\\uffa0\\ufff0-\\ufff8',
+  '\\ufdd0-\\ufdef\\ud800-\\udfff',
+  '\\u{1bca0}-\\u{1bca3}\\u{1d173}-\\u{1d17a}\\u{e0000}-\\u{e0fff}',
+  // U+FFFE/U+FFFF noncharacters in the BMP and every supplementary plane
+  '\\ufffe\\uffff',
+  '\\u{1fffe}\\u{1ffff}\\u{2fffe}\\u{2ffff}\\u{3fffe}\\u{3ffff}\\u{4fffe}\\u{4ffff}',
+  '\\u{5fffe}\\u{5ffff}\\u{6fffe}\\u{6ffff}\\u{7fffe}\\u{7ffff}\\u{8fffe}\\u{8ffff}',
+  '\\u{9fffe}\\u{9ffff}\\u{afffe}\\u{affff}\\u{bfffe}\\u{bffff}\\u{cfffe}\\u{cffff}',
+  '\\u{dfffe}\\u{dffff}\\u{efffe}\\u{effff}\\u{ffffe}\\u{fffff}\\u{10fffe}\\u{10ffff}'
+].join('') + ']', 'u')
 
 /** Validate bdx_signMessage params (PROTOCOL.md §4.6). Control characters and
  *  invisible/direction-control Unicode are rejected so a message cannot hide

@@ -20,6 +20,13 @@
 - A still-pending send / sign / sign-in approval is now cancelled when its
   page's message channel disconnects (connect approvals stay, being recoverable
   via the persisted grant).
+- **Sign-message filter now covers all default-ignorable Unicode** — the
+  `bdx_signMessage` / `bdx_signAuthChallenge` visual-integrity denylist was
+  extended from a hand-picked set to whole Unicode classes: the full
+  Default_Ignorable_Code_Point set (incl. U+061C, U+034F, U+206A–206F,
+  variation selectors like U+FE0F and their astral supplement, tags), C1
+  controls, noncharacters, and lone surrogates — so a dApp can't get a
+  signature over byte-distinct text that renders identically.
 - **Auto-lock honors real inactivity** — approval surfaces now keep the MV3
   worker warm with a `KEEPALIVE` heartbeat that does NOT re-arm auto-lock; only
   genuine pointer/keyboard/focus activity sends `TOUCH`. A pending, unattended
