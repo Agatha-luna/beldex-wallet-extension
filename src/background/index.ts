@@ -379,10 +379,19 @@ async function handle(req: BgRequest): Promise<BgResponse> {
     }
 
     case 'TOUCH': {
-      // Panel user activity: keep the session alive while the wallet is in use.
+      // REAL user activity (pointer/keyboard/focus in a wallet surface):
+      // re-arm the inactivity auto-lock. Approval surfaces must NOT send this
+      // as a bare heartbeat — that would hold an unlocked session open while
+      // the user is absent (external audit). Worker warmth uses KEEPALIVE.
       if (await getSession()) await touchAutoLock()
       return { ok: true }
     }
+
+    case 'KEEPALIVE':
+      // Keeps the MV3 service worker responsive during a long review WITHOUT
+      // touching the inactivity deadline — worker liveness is a port-lifecycle
+      // concern, not evidence of a user at the keyboard.
+      return { ok: true }
 
     case 'GET_AUTOLOCK':
       return { ok: true, minutes: await autoLockMinutes() }

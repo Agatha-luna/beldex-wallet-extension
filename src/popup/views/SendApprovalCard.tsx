@@ -17,6 +17,7 @@ import { getBridge } from '../../lib/bridge'
 import { rawPost, getAddressInfo } from '../../lib/lws'
 import { correctedTotalSent } from '../../lib/spent'
 import { sessionStore } from '../../lib/sessionStore'
+import { useApprovalKeepalive } from '../useApprovalKeepalive'
 import type { WalletSecrets } from '../../lib/messages'
 
 export interface SendReqParams {
@@ -109,13 +110,10 @@ export function SendApprovalCard({ reqId, origin, params, walletName, expect, on
     return () => { stop = true }
   }, [phase])
 
-  // Keepalive: the signing flow + user reading time must outlive the MV3
-  // service worker's ~30s idle timeout, or the dapp's reply channel dies.
-  useEffect(() => {
-    if (phase === 'success' || phase === 'failed') return
-    const t = setInterval(() => { sendToBackground({ type: 'TOUCH' }).catch(() => {}) }, 15_000)
-    return () => clearInterval(t)
-  }, [phase])
+  // Keep the MV3 worker warm through the review + signing flow (so the dapp's
+  // reply channel survives) WITHOUT re-arming auto-lock; only real input does
+  // that (external audit). Stops once the send is fully settled.
+  useApprovalKeepalive(phase !== 'success' && phase !== 'failed')
 
   const reject = async () => {
     await sendToBackground({ type: 'DAPP_REJECT', reqId })

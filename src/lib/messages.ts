@@ -30,7 +30,8 @@ export type BgRequest =
   | { type: 'CHANGE_PASSWORD'; oldPassword: string; newPassword: string }
   | { type: 'GET_AUTOLOCK' }
   | { type: 'SET_AUTOLOCK'; minutes: number }
-  | { type: 'TOUCH' } // user activity in the panel — re-arm the auto-lock timer
+  | { type: 'TOUCH' } // REAL user activity (pointer/keyboard/focus) — re-arms auto-lock
+  | { type: 'KEEPALIVE' } // keep the MV3 worker warm ONLY — must NOT re-arm auto-lock
   | { type: 'SWITCH_WALLET'; id: string }
   | { type: 'RENAME_WALLET'; name: string } // renames the active wallet
   | { type: 'WIPE'; password: string } // deletes the ACTIVE wallet only (password-gated)

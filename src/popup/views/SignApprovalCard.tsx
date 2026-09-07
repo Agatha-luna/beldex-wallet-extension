@@ -13,9 +13,10 @@
 //   homograph lookalikes stay visible.
 // - What a signature does — and does not — authorise is stated plainly.
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { sendToBackground } from '../../lib/messages'
 import { signMessage } from '../../lib/signMessage'
+import { useApprovalKeepalive } from '../useApprovalKeepalive'
 
 export interface SignReqParams {
   message: string
@@ -36,11 +37,8 @@ export function SignApprovalCard({ reqId, origin, params, walletName, expect, on
   const [phase, setPhase] = useState<Phase>('review')
   const [error, setError] = useState('')
 
-  // Keep the MV3 worker warm while the user reads (see ConnectApprovalCard).
-  useEffect(() => {
-    const t = setInterval(() => { sendToBackground({ type: 'TOUCH' }).catch(() => {}) }, 15_000)
-    return () => clearInterval(t)
-  }, [])
+  // Warm the worker without re-arming auto-lock (see ConnectApprovalCard).
+  useApprovalKeepalive()
 
   const reject = async () => {
     await sendToBackground({ type: 'DAPP_REJECT', reqId })

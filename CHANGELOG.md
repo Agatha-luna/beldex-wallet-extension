@@ -20,6 +20,11 @@
 - A still-pending send / sign / sign-in approval is now cancelled when its
   page's message channel disconnects (connect approvals stay, being recoverable
   via the persisted grant).
+- **Auto-lock honors real inactivity** — approval surfaces now keep the MV3
+  worker warm with a `KEEPALIVE` heartbeat that does NOT re-arm auto-lock; only
+  genuine pointer/keyboard/focus activity sends `TOUCH`. A pending, unattended
+  dApp approval can no longer hold an unlocked session past its configured
+  inactivity timeout. Settings text updated to state the policy.
 - **Message-verification weak-key rejection** — `checkSignature` (behind
   `bdx_verifyMessage`) now rejects the Ed25519 identity point and any
   torsion/small-order spend key before the signature equation. Such keys let an

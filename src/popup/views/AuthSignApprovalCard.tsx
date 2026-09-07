@@ -9,9 +9,10 @@
 // Signing uses the same SigV1 path as SignApprovalCard; it settles through
 // DAPP_AUTH_SIGN_COMPLETE, whose result carries the exact signed message.
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { sendToBackground } from '../../lib/messages'
 import { signMessage } from '../../lib/signMessage'
+import { useApprovalKeepalive } from '../useApprovalKeepalive'
 
 export interface AuthSignReqParams {
   message: string
@@ -35,10 +36,8 @@ export function AuthSignApprovalCard({ reqId, origin, params, walletName, expect
   const [phase, setPhase] = useState<Phase>('review')
   const [error, setError] = useState('')
 
-  useEffect(() => {
-    const t = setInterval(() => { sendToBackground({ type: 'TOUCH' }).catch(() => {}) }, 15_000)
-    return () => clearInterval(t)
-  }, [])
+  // Warm the worker without re-arming auto-lock (external audit).
+  useApprovalKeepalive()
 
   const reject = async () => {
     await sendToBackground({ type: 'DAPP_REJECT', reqId })

@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from 'react'
 import { sendToBackground, PendingApproval } from '../lib/messages'
+import { useApprovalKeepalive } from '../popup/useApprovalKeepalive'
 import { ConnectApprovalCard } from '../popup/views/ConnectApprovalCard'
 import { SendApprovalCard, SendReqParams } from '../popup/views/SendApprovalCard'
 import { SignApprovalCard, SignReqParams } from '../popup/views/SignApprovalCard'
@@ -57,14 +58,10 @@ export function ApprovalApp() {
 
   useEffect(() => { load() }, [])
 
-  // Keepalive: without messages the MV3 service worker idles out (~30s),
-  // severing the dapp's port. TOUCH every 15s keeps it warm. (The cards run
-  // their own keepalive too once mounted — harmless overlap.)
-  useEffect(() => {
-    if (phase === 'expired') return
-    const t = setInterval(() => { sendToBackground({ type: 'TOUCH' }).catch(() => {}) }, 15_000)
-    return () => clearInterval(t)
-  }, [phase])
+  // Warm the MV3 worker so the dapp's port survives a long review, WITHOUT
+  // re-arming auto-lock — only genuine input does that (external audit). The
+  // mounted card runs the same hook; the overlap is harmless.
+  useApprovalKeepalive(phase !== 'expired')
 
   const unlock = async () => {
     setBusy(true); setError('')
