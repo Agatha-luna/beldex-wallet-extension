@@ -15,7 +15,7 @@
 // reproducibility anchor.
 
 import { createHash } from 'node:crypto'
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,7 +26,13 @@ import process from 'node:process'
 // and hashing the script's own repo instead would make verification circular.
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const root = process.argv[2] === '--check' ? process.cwd() : scriptRoot
-const sh = (cmd) => execSync(cmd, { cwd: root, encoding: 'utf8' }).trim()
+
+// Shell-independent git: no shell, no cwd reliance — address the repo with -C
+// and pass args as an array so nothing (e.g. `HEAD^{tree}`) is shell-expanded.
+const git = (...args) => execFileSync('git', ['-C', scriptRoot, ...args], { encoding: 'utf8' }).trim()
+const npmVersion = () => {
+  try { return execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim() } catch { return 'unknown' }
+}
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex')
 
 // Same derivation as webpack.config.js hostPattern() — kept trivially small so
@@ -108,22 +114,28 @@ for (const t of TARGETS) {
   targets[t] = hashTarget(t)
 }
 
+const out = join(root, 'release', `build-manifest-v${pkg.version}.json`)
+
 const manifest = {
   name: pkg.name,
   version: pkg.version,
   builtAt: new Date().toISOString(),
-  commit: sh('git rev-parse HEAD'),
-  tree: sh('git rev-parse HEAD^{tree}'),
+  commit: git('rev-parse', 'HEAD'),
+  tree: git('rev-parse', 'HEAD^{tree}'),
   packageLockSha256: sha256(readFileSync(join(root, 'package-lock.json'))),
   nodeVersion: process.version,
-  npmVersion: sh('npm --version'),
+  npmVersion: npmVersion(),
   network: 'mainnet',
   resolvedConfig: net,          // non-secret build-time endpoints, as reviewed
   hostPermissions: expectedHosts,
-  targets
+  targets,
+  // This manifest is an attestation only when accompanied by its detached
+  // signature. package.sh produces `<file>.asc` when RELEASE_SIGNING_KEY is set
+  // and prints a prominent warning otherwise. An unsigned manifest (no .asc)
+  // must NOT be trusted as an official release attestation.
+  signing: `detached GPG signature expected at ${relative(root, out)}.asc — UNSIGNED if that file is absent`
 }
 
-const out = join(root, 'release', `build-manifest-v${pkg.version}.json`)
 writeFileSync(out, JSON.stringify(manifest, null, 2) + '\n')
 console.log(`wrote ${relative(root, out)}`)
 console.log(`  commit       ${manifest.commit}`)
