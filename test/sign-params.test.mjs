@@ -114,6 +114,27 @@ test('rejects the broader default-ignorable / format classes (audit follow-up)',
   }
 })
 
+test('rejects the reserved beldex-auth-v1 prefix (no forged auth statements)', () => {
+  // Audience-bound sign-in statements exist ONLY as wallet-composed
+  // bdx_signAuthChallenge output. A page calling bdx_signMessage directly
+  // (bypassing the SDK, which has the same client-side check) must not be
+  // able to get one signed — including with leading whitespace.
+  for (const m of [
+    'beldex-auth-v1 domain=https://evil.example uri=https://evil.example/ address=bx1 network=mainnet nonce=aaaaaaaa iat=1 exp=2',
+    'beldex-auth-v1',
+    '  beldex-auth-v1 anything'
+  ]) {
+    const r = validateSignParams({ message: m })
+    assert.equal(r.ok, false, JSON.stringify(m))
+    assert.match(r.error, /reserved/)
+  }
+  // A tab-prefixed attempt is also rejected — by the earlier control-char
+  // gate (tabs are C0), before the prefix check even runs.
+  assert.equal(validateSignParams({ message: '\tbeldex-auth-v1 x' }).ok, false)
+  // Prefix must anchor at the start: mentioning it inside text stays legal.
+  assert.equal(validateSignParams({ message: 'the beldex-auth-v1 format is neat' }).ok, true)
+})
+
 test('still accepts emoji WITHOUT a variation selector and combining marks', () => {
   // Base emoji (no VS16) and legitimate combining diacritics remain allowed;
   // only the invisible/ignorable selectors and controls are rejected.

@@ -553,6 +553,15 @@ export function validateSignParams(params: unknown): { ok: true; message: string
   if (DISALLOWED_SIGN_CHARS.test(p.message)) {
     return { ok: false, error: 'invalid field "message" (control, invisible or direction-control characters are not allowed)' }
   }
+  // The auth-statement prefix is RESERVED (PROTOCOL.md §4.6): audience-bound
+  // sign-in statements exist ONLY as wallet-composed bdx_signAuthChallenge
+  // output. Enforced here at the router — the SDK's identical client-side
+  // check is a convenience, not the security boundary — so a page calling the
+  // provider directly cannot get a forged auth statement signed. trimStart():
+  // leading whitespace must not smuggle the prefix past the gate.
+  if (p.message.trimStart().startsWith(AUTH_PREFIX)) {
+    return { ok: false, error: `invalid field "message" (the "${AUTH_PREFIX}" prefix is reserved for bdx_signAuthChallenge)` }
+  }
   return { ok: true, message: p.message }
 }
 
