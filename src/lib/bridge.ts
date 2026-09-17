@@ -86,3 +86,29 @@ export async function newIntegratedAddress(
 }
 // Fee estimation is handled inside async__send_funds (it computes the exact fee
 // during construction), so no standalone estimated_tx_network_fee wrapper.
+
+export interface TokenRegistrationInfo {
+  collateral_amount: string
+  collateral_lock_blocks: string
+  min_token_outputs: string
+  min_fork_version: string
+  max_ticker_length: string
+  max_full_name_length: string
+  max_decimal_point: string
+}
+
+/**
+ * Protocol constants for token registration (collateral, lock period,
+ * descriptor limits) — kept in the bridge rather than duplicated here so they
+ * can't drift out of step with consensus. Returns null on an older bridge
+ * build that doesn't export this call; callers fall back to built-in limits.
+ */
+export async function tokenRegistrationInfo(): Promise<TokenRegistrationInfo | null> {
+  const bridge = await getBridge()
+  if (typeof bridge.tokenRegistrationInfo !== 'function') return null
+  try {
+    return bridge.tokenRegistrationInfo()
+  } catch {
+    return null
+  }
+}

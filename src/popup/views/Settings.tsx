@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { sendToBackground, WalletSecrets } from '../../lib/messages'
 import { truncateUnlessTab } from '../../lib/format'
 import { copySecret, clearSecretNow } from '../../lib/clipboard'
+import { closePanel } from '../../lib/platform'
 import { useConnectedSites, UnlinkIcon } from './ConnectedSitesBadge'
 
 const REVEAL_SECONDS = 30 // revealed secrets auto-hide after this long
@@ -23,6 +24,49 @@ function EyeIcon({ off }: { off: boolean }) {
   )
 }
 
+// Menu-row icons — same stroke style as EyeIcon throughout, kept minimal and monochrome.
+const ICON_PROPS = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8 } as const
+
+function ChevronLeftIcon() {
+  return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6" /></svg>
+}
+function ExternalLinkIcon() {
+  return <svg {...ICON_PROPS}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><path d="M15 3h6v6" /><path d="M10 14L21 3" /></svg>
+}
+function DocumentIcon() {
+  return <svg {...ICON_PROPS}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /><line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="16" y2="17" /></svg>
+}
+function KeyIcon() {
+  return <svg {...ICON_PROPS}><circle cx="7.5" cy="15.5" r="4.5" /><path d="M10.6 12.4L20 3M17 6l3 3M14 9l2 2" /></svg>
+}
+function PencilIcon() {
+  return <svg {...ICON_PROPS}><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" /></svg>
+}
+function ShieldIcon() {
+  return <svg {...ICON_PROPS}><path d="M12 2l8 4v6c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z" /></svg>
+}
+function ClockIcon() {
+  return <svg {...ICON_PROPS}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2" /></svg>
+}
+function BellIcon() {
+  return <svg {...ICON_PROPS}><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.7 21a2 2 0 0 1-3.4 0" /></svg>
+}
+function LinkIcon() {
+  return <svg {...ICON_PROPS}><path d="M10 13a5 5 0 0 0 7.5.4l2-2a5 5 0 0 0-7-7l-1.2 1.1" /><path d="M14 11a5 5 0 0 0-7.5-.4l-2 2a5 5 0 0 0 7 7l1.1-1.1" /></svg>
+}
+function PlusCircleIcon() {
+  return <svg {...ICON_PROPS}><circle cx="12" cy="12" r="9" /><path d="M12 8v8M8 12h8" /></svg>
+}
+function TrashIcon() {
+  return <svg {...ICON_PROPS}><path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /></svg>
+}
+function LockIcon() {
+  return <svg {...ICON_PROPS}><rect x="4" y="11" width="16" height="10" rx="1" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
+}
+function HelpIcon() {
+  return <svg {...ICON_PROPS}><circle cx="12" cy="12" r="9" /><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1 .9-1 1.7" /><circle cx="12" cy="17" r="0.1" fill="currentColor" stroke="currentColor" strokeWidth="1.5" /></svg>
+}
+
 const SECRET_LABELS: Record<string, { title: string; field: keyof WalletSecrets; note: string }> = {
   seed: {
     title: 'Recovery Seed',
@@ -41,8 +85,8 @@ const SECRET_LABELS: Record<string, { title: string; field: keyof WalletSecrets;
   }
 }
 
-export function Settings({ walletName, onBack, onWiped, onChanged }:
-  { walletName: string; onBack: () => void; onWiped: () => void; onChanged: () => void }) {
+export function Settings({ walletName, onBack, onWiped, onChanged, onLock, onRegisterToken }:
+  { walletName: string; onBack: () => void; onWiped: () => void; onChanged: () => void; onLock: () => void; onRegisterToken: () => void }) {
   const [item, setItem] = useState<Item>('menu')
   const [password, setPassword] = useState('')
   const [revealed, setRevealed] = useState<WalletSecrets | null>(null)
@@ -313,38 +357,92 @@ export function Settings({ walletName, onBack, onWiped, onChanged }:
   // ---- menu ----
   return (
     <div className="card" style={{ padding: '8px 0' }}>
-      <h2 style={{ padding: '8px 16px 4px' }}>Settings</h2>
-      <div className="menu-item" onClick={() => go('seed')}>
-        <span>Show Recovery Seed</span><span className="chev">›</span>
+      <div className="settings-header">
+        <button className="settings-back" title="Back" onClick={onBack}><ChevronLeftIcon /></button>
+        <h2></h2>
       </div>
-      <div className="menu-item" onClick={() => go('viewKey')}>
-        <span>Show Private View Key</span><span className="chev">›</span>
-      </div>
-      <div className="menu-item" onClick={() => go('spendKey')}>
-        <span>Show Private Spend Key</span><span className="chev">›</span>
-      </div>
-      <div className="menu-item" onClick={() => { setNewName(walletName); go('rename') }}>
-        <span>Rename Wallet {walletName ? `(${walletName})` : ''}</span><span className="chev">›</span>
-      </div>
-      <div className="menu-item" onClick={() => go('password')}>
-        <span>Change Password</span><span className="chev">›</span>
-      </div>
-      <div className="menu-item" onClick={() => go('autolock')}>
-        <span>Auto-Lock {autoLock ? `(${autoLock >= 60 ? `${autoLock / 60}h` : `${autoLock}m`})` : ''}</span>
+
+      {!new URLSearchParams(location.search).has('tab') && (
+        <div className="settings-item" onClick={async () => {
+          await chrome.tabs.create({ url: chrome.runtime.getURL('panel.html?tab=1') })
+          closePanel() // close the side panel/sidebar; the tab takes over
+        }}>
+          <span className="icon"><ExternalLinkIcon /></span>
+          <span className="label">Open Full Screen</span>
+          <span className="chev">›</span>
+        </div>
+      )}
+
+      <div className="settings-divider" />
+      <div className="settings-section-label">Wallet</div>
+      <div className="settings-item" onClick={() => { setNewName(walletName); go('rename') }}>
+        <span className="icon"><PencilIcon /></span>
+        <span className="label">Rename Wallet {walletName ? `(${walletName})` : ''}</span>
         <span className="chev">›</span>
       </div>
-      <div className="menu-item" onClick={toggleNotifAmount}>
-        <span>Hide amount in notifications</span>
+      <div className="settings-item" onClick={() => go('autolock')}>
+        <span className="icon"><ClockIcon /></span>
+        <span className="label">Auto-Lock {autoLock ? `(${autoLock >= 60 ? `${autoLock / 60}h` : `${autoLock}m`})` : ''}</span>
+        <span className="chev">›</span>
+      </div>
+      <div className="settings-item" onClick={toggleNotifAmount}>
+        <span className="icon"><BellIcon /></span>
+        <span className="label">Hide amount in notifications</span>
         <span className={`switch ${hideNotifAmount ? 'on' : ''}`}><span className="knob" /></span>
       </div>
-      <div className="menu-item" onClick={() => go('sites')}>
-        <span>Connected Sites</span><span className="chev">›</span>
+      <div className="settings-item" onClick={() => go('sites')}>
+        <span className="icon"><LinkIcon /></span>
+        <span className="label">Connected Sites</span>
+        <span className="chev">›</span>
       </div>
-      <div className="menu-item danger" onClick={() => go('delete')}>
-        <span>Delete Wallet</span><span className="chev">›</span>
+
+      <div className="settings-divider" />
+      <div className="settings-section-label">Tokens</div>
+      <div className="settings-item" onClick={onRegisterToken}>
+        <span className="icon"><PlusCircleIcon /></span>
+        <span className="label">Register Token</span>
+        <span className="chev">›</span>
       </div>
-      <div style={{ padding: '10px 16px 4px' }}>
-        <button className="btn-ghost" style={{ width: '100%' }} onClick={onBack}>Back</button>
+
+      <div className="settings-divider" />
+      <div className="settings-section-label">Security</div>
+      <div className="settings-item" onClick={() => go('seed')}>
+        <span className="icon"><DocumentIcon /></span>
+        <span className="label">Show Recovery Seed</span>
+        <span className="chev">›</span>
+      </div>
+      <div className="settings-item" onClick={() => go('viewKey')}>
+        <span className="icon"><EyeIcon off={false} /></span>
+        <span className="label">Show Private View Key</span>
+        <span className="chev">›</span>
+      </div>
+      <div className="settings-item" onClick={() => go('spendKey')}>
+        <span className="icon"><KeyIcon /></span>
+        <span className="label">Show Private Spend Key</span>
+        <span className="chev">›</span>
+      </div>
+      <div className="settings-item" onClick={() => go('password')}>
+        <span className="icon"><ShieldIcon /></span>
+        <span className="label">Change Password</span>
+        <span className="chev">›</span>
+      </div>
+
+      <div className="settings-divider" />
+      <div className="settings-item danger" onClick={() => go('delete')}>
+        <span className="icon"><TrashIcon /></span>
+        <span className="label">Delete Wallet</span>
+        <span className="chev">›</span>
+      </div>
+      <div className="settings-item" onClick={() => chrome.tabs.create({ url: 'https://beldex.io/' })}>
+        <span className="icon"><HelpIcon /></span>
+        <span className="label">Support</span>
+        <span className="chev">›</span>
+      </div>
+
+      <div className="settings-divider" />
+      <div className="settings-item danger" onClick={onLock}>
+        <span className="icon"><LockIcon /></span>
+        <span className="label">Lock</span>
       </div>
     </div>
   )
