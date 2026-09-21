@@ -18,9 +18,10 @@ import { wireToolbarOpensPanel } from '../lib/platform'
 import { sessionStore } from '../lib/sessionStore'
 import {
   initDappBridge, dappGetPending, dappFirstPending, dappApprove, dappReject,
-  dappComplete, dappSignComplete, dappFail, dappSendLockAcquire, dappSendLockRelease,
+  dappBeginSend, dappComplete, dappSignComplete, dappFail, dappSendLockAcquire, dappSendLockRelease,
   dappListOrigins, dappRevokeOrigin, dappActiveTabSite, dappNotifyLocked, dappNotifyUnlocked,
-  dappNotifyWalletSwitched, dappNotifyBalanceFromInfo, dappCleanupWallet
+  dappNotifyWalletSwitched, dappNotifyBalanceFromInfo, dappCleanupWallet,
+  dappInvalidateOnSessionEnd, dappInvalidateForWallet, dappAuthSignComplete
 } from './dapp'
 
 // Open the panel when the toolbar icon is clicked (Chrome side panel / Firefox sidebar).
@@ -80,7 +81,13 @@ async function walletList(): Promise<WalletMeta[]> {
 
 // ---- session ----------------------------------------------------------------
 
-interface Session { walletId: string; secrets: WalletSecrets }
+interface Session {
+  walletId: string
+  /** Fresh random id per unlock (external audit): approvals reviewed under one
+   *  session must not execute under another — bound GET_SECRETS checks it. */
+  generation: string
+  secrets: WalletSecrets
+}
 
 async function getSession(): Promise<Session | null> {
   const o = await sessionStore.get(SESSION_KEY)
@@ -93,18 +100,26 @@ async function startSession(walletId: string, secrets: WalletSecrets): Promise<v
   // Settings' reveal flows re-decrypt the vault via REVEAL). Keeps the most
   // catastrophic secrets out of every GET_SECRETS round-trip and JS context.
   const sessionSecrets: WalletSecrets = { ...secrets, mnemonic: '', seed: '' }
-  await sessionStore.set({ [SESSION_KEY]: { walletId, secrets: sessionSecrets } })
+  await sessionStore.set({ [SESSION_KEY]: { walletId, generation: crypto.randomUUID(), secrets: sessionSecrets } })
   await touchAutoLock()
   chrome.alarms.create(ALARM_SYNC, { periodInMinutes: 0.5, delayInMinutes: 0 })
-  dappNotifyUnlocked(secrets.address).catch(() => {})
+  // walletId passed EXPLICITLY (external audit): this runs detached, and the
+  // active id may have changed by the time it executes — the notification
+  // must describe the wallet that actually unlocked.
+  dappNotifyUnlocked(walletId, secrets.address).catch(() => {})
 }
 
 async function endSession(): Promise<void> {
-  const hadSession = !!(await getSession())
+  const session = await getSession()
   await sessionStore.remove([SESSION_KEY, CACHE_KEY])
   await chrome.alarms.clear(ALARM_SYNC)
   await chrome.alarms.clear(ALARM_LOCK)
-  if (hadSession) dappNotifyLocked().catch(() => {})
+  if (session) {
+    // Same explicit-id rule as unlock; and approvals reviewed under this
+    // session (send/sign) die with it (external audit).
+    dappNotifyLocked(session.walletId).catch(() => {})
+    dappInvalidateOnSessionEnd().catch(() => {})
+  }
 }
 
 // ---- brute-force backoff --------------------------------------------------------
@@ -175,10 +190,17 @@ async function touchAutoLock() {
 
 // ---- background sync ----------------------------------------------------------
 
+// Single-flight guard (external audit): the 30s alarm must not start a second
+// sync while one is still in flight (a slow/hanging LWS would otherwise let
+// overlapping fetches accumulate). Bounded regardless by the fetch deadline.
+let syncInFlight = false
+
 async function syncOnce(): Promise<void> {
+  if (syncInFlight) return
   const session = await getSession()
   if (!session) { chrome.alarms.clear(ALARM_SYNC); return }
   const s = session.secrets
+  syncInFlight = true
   try {
     const info = await lws.getAddressInfo({ address: s.address, view_key: s.secViewKey })
     const prevCache = (await sessionStore.get(CACHE_KEY))[CACHE_KEY]
@@ -216,6 +238,8 @@ async function syncOnce(): Promise<void> {
     }
   } catch {
     // network/LWS hiccup — next alarm will retry
+  } finally {
+    syncInFlight = false
   }
 }
 
@@ -262,6 +286,7 @@ async function handle(req: BgRequest): Promise<BgResponse> {
       await setWallets(wallets)
       await chrome.storage.local.set({ [ACTIVE_KEY]: id })
       await endSession() // drop any previous wallet's session/cache
+      await dappInvalidateForWallet(id) // approvals for other wallets are void
       await startSession(id, req.secrets)
       return stateResponse()
     }
@@ -279,6 +304,13 @@ async function handle(req: BgRequest): Promise<BgResponse> {
           await setWallets(wallets)
         }
         await backoffReset(activeId)
+        // TOCTOU re-check (external audit): decryption is slow (PBKDF2-600k)
+        // and a concurrent SWITCH_WALLET may have changed the active id —
+        // starting this session anyway would leave session.walletId pointing
+        // at a wallet that is no longer active, and GET_SECRETS would serve it.
+        if (await getActiveId() !== activeId) {
+          return { ok: false, error: 'Wallet switched during unlock — try again' }
+        }
         await startSession(activeId, secrets)
         return stateResponse()
       } catch {
@@ -294,6 +326,16 @@ async function handle(req: BgRequest): Promise<BgResponse> {
     case 'GET_SECRETS': {
       const session = await getSession()
       if (!session) return { ok: false, error: 'Locked' }
+      // Bound fetch (external audit): approval flows pass the wallet/session
+      // context recorded when their request was queued; secrets are refused if
+      // the session OR the active wallet has changed since review began.
+      if (req.expect) {
+        const activeId = await getActiveId()
+        if (session.walletId !== req.expect.walletId || activeId !== req.expect.walletId
+          || (req.expect.generation !== null && session.generation !== req.expect.generation)) {
+          return { ok: false, error: 'Wallet changed — review this request again' }
+        }
+      }
       await touchAutoLock()
       return { ok: true, secrets: session.secrets }
     }
@@ -337,10 +379,19 @@ async function handle(req: BgRequest): Promise<BgResponse> {
     }
 
     case 'TOUCH': {
-      // Panel user activity: keep the session alive while the wallet is in use.
+      // REAL user activity (pointer/keyboard/focus in a wallet surface):
+      // re-arm the inactivity auto-lock. Approval surfaces must NOT send this
+      // as a bare heartbeat — that would hold an unlocked session open while
+      // the user is absent (external audit). Worker warmth uses KEEPALIVE.
       if (await getSession()) await touchAutoLock()
       return { ok: true }
     }
+
+    case 'KEEPALIVE':
+      // Keeps the MV3 service worker responsive during a long review WITHOUT
+      // touching the inactivity deadline — worker liveness is a port-lifecycle
+      // concern, not evidence of a user at the keyboard.
+      return { ok: true }
 
     case 'GET_AUTOLOCK':
       return { ok: true, minutes: await autoLockMinutes() }
@@ -360,6 +411,9 @@ async function handle(req: BgRequest): Promise<BgResponse> {
       if (req.id !== activeId) {
         await endSession() // switching requires the target wallet's password
         await chrome.storage.local.set({ [ACTIVE_KEY]: req.id })
+        // Approvals queued for the previous wallet are void (external audit) —
+        // approving them now would bind a different wallet than displayed.
+        await dappInvalidateForWallet(req.id)
         dappNotifyWalletSwitched().catch(() => {}) // grants never carry over
       }
       return stateResponse()
@@ -419,8 +473,17 @@ async function handle(req: BgRequest): Promise<BgResponse> {
     case 'DAPP_REJECT':
       return dappReject(req.reqId)
 
+    case 'DAPP_BEGIN_SEND': {
+      const r = await dappBeginSend(req.reqId)
+      return r.ok
+        ? { ok: true, executionToken: r.executionToken, operationId: r.operationId }
+        : { ok: false, error: r.error }
+    }
+
     case 'DAPP_COMPLETE': {
-      const r = await dappComplete(req.reqId, req.result)
+      const r = await dappComplete(req.reqId, {
+        operationId: req.operationId, executionToken: req.executionToken, result: req.result
+      })
       // Refresh the cache promptly so balanceChanged reaches connected dapps.
       syncOnce().catch(() => {})
       return r.ok ? { ok: true } : { ok: false, error: r.error }
@@ -431,16 +494,23 @@ async function handle(req: BgRequest): Promise<BgResponse> {
       return r.ok ? { ok: true } : { ok: false, error: r.error }
     }
 
-    case 'DAPP_FAIL':
-      return dappFail(req.reqId)
-
-    case 'SEND_LOCK_ACQUIRE': {
-      const r = await dappSendLockAcquire()
+    case 'DAPP_AUTH_SIGN_COMPLETE': {
+      const r = await dappAuthSignComplete(req.reqId, req.result)
       return r.ok ? { ok: true } : { ok: false, error: r.error }
     }
 
+    case 'DAPP_FAIL':
+      return dappFail(req.reqId, {
+        operationId: req.operationId, executionToken: req.executionToken, unknown: req.unknown
+      })
+
+    case 'SEND_LOCK_ACQUIRE': {
+      const r = await dappSendLockAcquire()
+      return r.ok ? { ok: true, lockOwner: r.owner } : { ok: false, error: r.error }
+    }
+
     case 'SEND_LOCK_RELEASE':
-      return dappSendLockRelease()
+      return dappSendLockRelease(req.owner)
 
     case 'DAPP_LIST_ORIGINS':
       return { ok: true, origins: await dappListOrigins() }

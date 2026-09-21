@@ -90,3 +90,55 @@ test('rejects invisible characters', () => {
       'U+' + c.codePointAt(0).toString(16))
   }
 })
+
+test('rejects the broader default-ignorable / format classes (audit follow-up)', () => {
+  const cps = [
+    0x061c,          // ARABIC LETTER MARK (bidi, was omitted)
+    0x034f,          // COMBINING GRAPHEME JOINER (was omitted)
+    0x206a, 0x206f,  // deprecated formatting controls (was omitted)
+    0x115f, 0x1160, 0x3164, 0xffa0, // Hangul fillers
+    0x17b4, 0x17b5,  // Khmer inherent vowels
+    0x180e, 0x180b, 0x180f, // Mongolian MVS / FVS
+    0xfe00, 0xfe0f,  // variation selectors (incl. VS16, was omitted)
+    0xe0100, 0xe01ef, // variation selectors supplement (astral)
+    0xe0001, 0xe007f, // language tag + cancel tag (astral)
+    0x1d173,          // musical begin-beam format control (astral)
+    0x1bca0,          // shorthand format control (astral)
+    0x0080, 0x009f,   // C1 controls (was omitted)
+    0xfdd0, 0xfffe, 0x1fffe, 0x10ffff, // noncharacters (BMP + astral planes)
+  ]
+  for (const cp of cps) {
+    const c = String.fromCodePoint(cp)
+    assert.equal(validateSignParams({ message: `visible${c}hidden` }).ok, false,
+      'must reject U+' + cp.toString(16).toUpperCase())
+  }
+})
+
+test('rejects the reserved beldex-auth-v1 prefix (no forged auth statements)', () => {
+  // Audience-bound sign-in statements exist ONLY as wallet-composed
+  // bdx_signAuthChallenge output. A page calling bdx_signMessage directly
+  // (bypassing the SDK, which has the same client-side check) must not be
+  // able to get one signed — including with leading whitespace.
+  for (const m of [
+    'beldex-auth-v1 domain=https://evil.example uri=https://evil.example/ address=bx1 network=mainnet nonce=aaaaaaaa iat=1 exp=2',
+    'beldex-auth-v1',
+    '  beldex-auth-v1 anything'
+  ]) {
+    const r = validateSignParams({ message: m })
+    assert.equal(r.ok, false, JSON.stringify(m))
+    assert.match(r.error, /reserved/)
+  }
+  // A tab-prefixed attempt is also rejected — by the earlier control-char
+  // gate (tabs are C0), before the prefix check even runs.
+  assert.equal(validateSignParams({ message: '\tbeldex-auth-v1 x' }).ok, false)
+  // Prefix must anchor at the start: mentioning it inside text stays legal.
+  assert.equal(validateSignParams({ message: 'the beldex-auth-v1 format is neat' }).ok, true)
+})
+
+test('still accepts emoji WITHOUT a variation selector and combining marks', () => {
+  // Base emoji (no VS16) and legitimate combining diacritics remain allowed;
+  // only the invisible/ignorable selectors and controls are rejected.
+  for (const m of ['coffee ☕', 'café', 'àḅc']) {
+    assert.equal(validateSignParams({ message: m }).ok, true, JSON.stringify(m))
+  }
+})

@@ -4,6 +4,7 @@
 // no market value, and CoinGecko isn't in that build's host_permissions.
 
 import { CONFIG } from './config'
+import { fetchJson, HTTP } from './http'
 
 const TTL_MS = 60_000
 
@@ -14,9 +15,7 @@ export async function getBdxPriceUsdt(): Promise<number | null> {
   if (!CONFIG.SHOW_FIAT) return null
   if (cached && Date.now() - cached.at < TTL_MS) return cached.price
   try {
-    const res = await fetch(CONFIG.PRICE_URL)
-    if (!res.ok) throw new Error(String(res.status))
-    const json = await res.json()
+    const json = await fetchJson<any>(CONFIG.PRICE_URL, {}, HTTP.PRICE)
     const p = Number(json?.beldex?.usdt ?? json?.beldex?.usd)
     if (!Number.isFinite(p) || p <= 0) return cached?.price ?? null
     cached = { price: p, at: Date.now() }

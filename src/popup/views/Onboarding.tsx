@@ -218,6 +218,21 @@ export function Onboarding({ onDone, addMode = false, onCancel }:
   return (
     <div className="wrap">
       <h2>Restore wallet</h2>
+      <div style={{
+        border: '1px solid var(--border)', borderLeft: '3px solid var(--green)',
+        borderRadius: 6, padding: '10px 12px', marginBottom: 12, background: '#0d0d0d'
+      }}>
+        <p className="muted" style={{ margin: 0, lineHeight: 1.55 }}>
+          <b style={{ color: 'var(--green)' }}>Heads up — this is a light wallet.</b> It tracks
+          activity from the moment you restore, so your <b>past balance and history won’t appear
+          automatically</b>.
+        </p>
+        <p className="muted" style={{ margin: '8px 0 0', lineHeight: 1.55 }}>
+          To bring your funds over: finish restoring here, then open your <b>existing</b> wallet
+          and send your full balance to this wallet’s own address (a self-transfer). Your balance
+          shows up here once that transaction confirms.
+        </p>
+      </div>
       <textarea rows={4} placeholder="Enter your 25-word seed"
         value={mnemonic} onChange={e => setMnemonic(e.target.value)} />
       <input placeholder="Wallet name (e.g. Savings)" value={name}

@@ -20,7 +20,8 @@ const src = readFileSync(join(here, '../src/lib/dappProtocol.ts'), 'utf8')
 
 const METHODS = [
   'bdx_connect', 'bdx_disconnect', 'bdx_getAddress', 'bdx_getBalance',
-  'bdx_sendTransaction', 'bdx_signMessage', 'bdx_verifyMessage',
+  'bdx_sendTransaction', 'bdx_getOperationStatus', 'bdx_signMessage',
+  'bdx_signAuthChallenge', 'bdx_verifyMessage',
   'bdx_resolveBns', 'bdx_getNetwork', 'bdx_getState'
 ]
 
@@ -29,6 +30,18 @@ test('dappProtocol.ts declares the exact protocol v1 method set', () => {
   assert.ok(src.includes("REQUEST_TARGET = 'beldex-contentscript'"))
   assert.ok(src.includes("RESPONSE_TARGET = 'beldex-inpage'"))
   assert.ok(src.includes('PROTOCOL_VERSION = 1'))
+})
+
+// Bidirectional drift guard (external audit — docs/types must not diverge from
+// code): the DAPP_METHODS array actually declared in source must EXACTLY equal
+// the list this test (and the README table) pin. Adding or removing a wire
+// method without updating both fails CI here.
+test('DAPP_METHODS in source matches the pinned set exactly', () => {
+  const block = src.match(/DAPP_METHODS\s*=\s*\[([\s\S]*?)\]/)
+  assert.ok(block, 'could not locate DAPP_METHODS in dappProtocol.ts')
+  const declared = [...block[1].matchAll(/'([^']+)'/g)].map(m => m[1])
+  assert.deepEqual([...declared].sort(), [...METHODS].sort(),
+    'DAPP_METHODS drifted from the pinned method set — update the README table and this test')
 })
 
 test('dappProtocol.ts declares the exact protocol v1 error codes', () => {
@@ -51,7 +64,8 @@ const js = ts.transpileModule(src, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 }
 }).outputText
 const mod = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'))
-const { parseDappRequest } = mod
+const { parseDappRequest, validatePortMessage } = mod
+const T = 'beldex-contentscript'
 
 test('accepts exact-shape requests', () => {
   const r = parseDappRequest({ target: 'beldex-contentscript', id: 'abc', method: 'bdx_connect' })
@@ -83,4 +97,56 @@ test('every protocol method is accepted', () => {
   for (const method of METHODS) {
     assert.ok(parseDappRequest({ target: 'beldex-contentscript', id: 'i', method }), method)
   }
+})
+
+// ---- per-method schema bounding (external audit) ----------------------------
+
+test('no-parameter methods reject any non-empty params object', () => {
+  for (const method of ['bdx_connect', 'bdx_getState', 'bdx_getNetwork', 'bdx_getAddress', 'bdx_getBalance', 'bdx_disconnect']) {
+    // empty params object is tolerated; a populated one is rejected
+    assert.ok(parseDappRequest({ target: T, id: 'a', method, params: {} }), `${method} + {}`)
+    assert.equal(parseDappRequest({ target: T, id: 'a', method, params: { junk: 1 } }), null, `${method} + junk`)
+  }
+})
+
+test('oversized string fields are rejected at the boundary', () => {
+  const big = 'x'.repeat(100_000)
+  assert.equal(parseDappRequest({ target: T, id: 'a', method: 'bdx_verifyMessage', params: { message: big, address: 'bx', signature: 'SigV1' } }), null)
+  assert.equal(parseDappRequest({ target: T, id: 'a', method: 'bdx_signMessage', params: { message: 'x'.repeat(513) } }), null)
+  assert.equal(parseDappRequest({ target: T, id: 'a', method: 'bdx_resolveBns', params: { name: 'x'.repeat(65) } }), null)
+  assert.equal(parseDappRequest({ target: T, id: 'a', method: 'bdx_getOperationStatus', params: { operationId: 'x'.repeat(129) } }), null)
+  // within caps -> accepted
+  assert.ok(parseDappRequest({ target: T, id: 'a', method: 'bdx_signMessage', params: { message: 'ok' } }))
+})
+
+test('unknown fields, wrong types, and non-primitive values are rejected', () => {
+  assert.equal(parseDappRequest({ target: T, id: 'a', method: 'bdx_signMessage', params: { message: 'ok', extra: 1 } }), null, 'unknown field')
+  assert.equal(parseDappRequest({ target: T, id: 'a', method: 'bdx_signMessage', params: { message: 42 } }), null, 'wrong type')
+  assert.equal(parseDappRequest({ target: T, id: 'a', method: 'bdx_verifyMessage', params: { message: { nested: 'deep' }, address: 'a', signature: 's' } }), null, 'nested object value')
+  // recognized fields only are copied through (no leftover junk)
+  const r = parseDappRequest({ target: T, id: 'a', method: 'bdx_sendTransaction', params: { to: 'bxabc', amount: '100', sweep: false } })
+  assert.deepEqual(r.params, { to: 'bxabc', amount: '100', sweep: false })
+})
+
+test('prototype-pollution keys are rejected, not copied', () => {
+  // JSON.parse / structured clone create an OWN "__proto__" key; it is unknown
+  // to the schema and must reject the request rather than touch the prototype.
+  const evil = JSON.parse('{"message":"ok","__proto__":{"polluted":true}}')
+  assert.equal(parseDappRequest({ target: T, id: 'a', method: 'bdx_signMessage', params: evil }), null)
+  assert.equal(({}).polluted, undefined, 'prototype must be untouched')
+})
+
+test('too many keys is rejected without deep work', () => {
+  const many = {}
+  for (let i = 0; i < 100; i++) many['k' + i] = 1
+  assert.equal(parseDappRequest({ target: T, id: 'a', method: 'bdx_sendTransaction', params: many }), null)
+})
+
+test('validatePortMessage applies the same schema (no page target)', () => {
+  // authoritative background re-validation: rejects unknown method, oversized
+  // params, and junk on no-param methods — independent of the content script.
+  assert.ok(validatePortMessage({ id: 'a', method: 'bdx_signMessage', params: { message: 'ok' } }))
+  assert.equal(validatePortMessage({ id: 'a', method: 'evil' }), null)
+  assert.equal(validatePortMessage({ id: 'a', method: 'bdx_signMessage', params: { message: 'x'.repeat(513) } }), null)
+  assert.equal(validatePortMessage({ id: 'a', method: 'bdx_getState', params: { junk: 1 } }), null)
 })
