@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { truncateMiddle, timeAgo } from '../../lib/format'
 import { fmtToken, groupDigits, shortenTokenId, tokenColor } from '../../lib/tokenAmount'
 import { TokenRow } from './Tokens'
+import { ChevronLeftIcon } from './Settings'
 
 export interface TokenHistoryRow {
   hash: string
@@ -42,8 +43,8 @@ export function TokenDetail({ token, history, onSend, onReceive, onBack, onSelec
   return (
     <>
       <div className="card">
-        <div className="settings-header">
-          <button className="settings-back" title="Back" onClick={onBack}>‹</button>
+        <div className="settings-header" style={{ paddingLeft: 0, paddingRight: 0, marginLeft: -16 }}>
+          <button className="settings-back" title="Back" onClick={onBack}><ChevronLeftIcon size={22} /></button>
           <h2>{displayName}</h2>
         </div>
 
@@ -74,7 +75,7 @@ export function TokenDetail({ token, history, onSend, onReceive, onBack, onSelec
           <span className="muted">Token ID</span>
           <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span title={token.tokenId}>{truncateMiddle(token.tokenId, 8)}</span>
-            <button className="btn-icon" onClick={copyId}>{copied ? '✓' : '⧉'}</button>
+            <button className="btn-icon" style={{ border: 'none' }} onClick={copyId}>{copied ? '✓' : '⧉'}</button>
           </span>
         </div>
         {describable && <div className="detail-row"><span className="muted">Decimals</span><span>{token.decimalPoint}</span></div>}

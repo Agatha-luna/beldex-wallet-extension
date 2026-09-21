@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { sendToBackground, WalletMeta, WalletSecrets } from '../../lib/messages'
 import { Onboarding } from './Onboarding'
 import { correctedTotalSent, verifiedTokenBalances } from '../../lib/spent'
-import { ATOMIC, fmtBDX, parseAtomic, toAtomic, absBig, toBdxFloat } from '../../lib/money'
+import { fmtBDX, parseAtomic, toAtomic, absBig, toBdxFloat } from '../../lib/money'
 import * as lws from '../../lib/lws'
 import { sendFunds, SEND_STEPS } from '../../lib/send'
-import { Settings } from './Settings'
+import { Settings, ChevronLeftIcon } from './Settings'
 import { Receive } from './Receive'
 import { Tokens, TokenRow } from './Tokens'
 import { TokenDetail } from './TokenDetail'
@@ -19,7 +19,7 @@ import { sessionStore } from '../../lib/sessionStore'
 import { CONFIG } from '../../lib/config'
 import { getTokenBalances, fetchAllTokenOutputs, isTokenLookupUnsupported } from '../../lib/tokenApi'
 import { fmtToken, toTokenAtomic, groupDigits, shortenTokenId, tokenColor, UINT64_MAX } from '../../lib/tokenAmount'
-import { loadKnownTokenIds, rememberTokenIds, loadRegisteredTokens, appendRegisteredToken, RegisteredToken } from '../../lib/tokenStorage'
+import { loadKnownTokenIds, rememberTokenIds, loadRegisteredTokens, appendRegisteredToken } from '../../lib/tokenStorage'
 
 const POLL_MS = 10_000 // Beldex block time ~30s; poll LWS every 10s while popup is open
 // How long a just-broadcast registration is given before its absence from the
@@ -168,7 +168,6 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
   const [tokensLoading, setTokensLoading] = useState(false)
   // null = no lookup attempted yet; false = this server has no token endpoints.
   const [tokensSupported, setTokensSupported] = useState<boolean | null>(null)
-  const [registeredTokens, setRegisteredTokens] = useState<RegisteredToken[]>([])
   // Protocol constants (collateral, descriptor limits) come from the bridge so
   // they can't drift out of step with consensus. Null on an older bridge; the
   // form then falls back to built-in limits.
@@ -202,7 +201,6 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
   }, [view, tokenDetailId, tokenRows])
 
   useEffect(() => { tokenRegistrationInfo().then(setTokenRegInfo).catch(() => {}) }, [])
-  useEffect(() => { loadRegisteredTokens(address).then(setRegisteredTokens) }, [address])
 
   const refreshTokens = async (c: lws.Credentials) => {
     setTokensLoading(true)
@@ -611,7 +609,6 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
           txHash: r.tx_hash,
           registeredAt: Date.now()
         })
-        setRegisteredTokens(await loadRegisteredTokens(address))
         setRegisteredResult({ tokenId: r.token_id, ticker: tokenTicker.trim() })
       } else {
         setRegisteredResult(null)
@@ -719,7 +716,7 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
             history={history}
             onSend={() => { setSendAsset(token.tokenId); setTokenToggle(false); setTxResult(''); setFormError(''); setAssetPickerOpen(false); setPickerFromHome(false); setView('send') }}
             onReceive={() => { setReceiveToken(token); setView('receive') }}
-            onBack={() => setView('tokens')}
+            onBack={() => setView('home')}
             onSelectTx={hash => {
               const tx = txs.find(t => t.hash === hash)
               if (tx) { setTxHashCopied(false); setSelectedTx(tx) }
@@ -900,16 +897,16 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
           !q || t.ticker.toLowerCase().includes(q) || t.fullName.toLowerCase().includes(q))
         return (
           <div className="card" style={{ padding: '8px 0' }}>
-            <div className="settings-header">
+            <div className="settings-header" style={{ paddingLeft: 0, paddingRight: 0 }}>
               <button className="settings-back" title="Back" onClick={() => {
                 setAssetSearch('')
                 if (pickerFromHome) setView('home')
                 setAssetPickerOpen(false)
-              }}>‹</button>
+              }}><ChevronLeftIcon size={22} /></button>
               <h2>Send</h2>
             </div>
-            <div style={{ padding: '0 16px 10px' }}>
-              <input placeholder="Search for an asset to send" autoFocus value={assetSearch}
+            <div style={{ padding: '0 0 10px' }}>
+              <input placeholder="Search tokens..." autoFocus value={assetSearch}
                 onChange={e => setAssetSearch(e.target.value)} style={{ marginBottom: 0 }} />
             </div>
             <div className="token-list" style={{ maxHeight: 'none' }}>
@@ -954,8 +951,8 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
         <div className="card">
           {!tokenToggle ? (
             <>
-              <div className="settings-header">
-                <button className="settings-back" title="Back" onClick={() => setView('home')}>‹</button>
+              <div className="settings-header" style={{ paddingLeft: 0, paddingRight: 0, marginLeft: -16 }}>
+                <button className="settings-back" title="Back" onClick={() => setView('home')}><ChevronLeftIcon size={22} /></button>
                 <h2>{isTokenSend ? selectedToken!.ticker : 'BDX'}</h2>
               </div>
               <div style={{ textAlign: 'center' }}>
@@ -1071,8 +1068,8 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
               </button>
             </div>
             <button className="btn-ghost" style={{ width: '100%', marginTop: 8 }} disabled={sending}
-              onClick={() => { setTokenToggle(false); setFormError('') }}>
-              ← Back to Send
+              onClick={() => { setTokenToggle(false); setFormError(''); setView('home') }}>
+              ← Back
             </button>
           </>}
         </div>
