@@ -8,24 +8,22 @@
 // visible.
 
 import { useEffect, useState } from 'react'
-import { sendToBackground } from '../lib/messages'
+import { sendToBackground, PendingApproval } from '../lib/messages'
+import { useApprovalKeepalive } from '../popup/useApprovalKeepalive'
 import { ConnectApprovalCard } from '../popup/views/ConnectApprovalCard'
 import { SendApprovalCard, SendReqParams } from '../popup/views/SendApprovalCard'
 import { SignApprovalCard, SignReqParams } from '../popup/views/SignApprovalCard'
+import { AuthSignApprovalCard, AuthSignReqParams } from '../popup/views/AuthSignApprovalCard'
 
 type Phase = 'loading' | 'expired' | 'unlock' | 'confirm'
-
-interface Pending { origin: string; method: string; params?: object }
 
 export function ApprovalApp() {
   const reqId = new URLSearchParams(location.search).get('reqId') ?? ''
 
   const [phase, setPhase] = useState<Phase>('loading')
-  const [pending, setPending] = useState<Pending | null>(null)
+  const [pending, setPending] = useState<PendingApproval | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [walletName, setWalletName] = useState('')
-  const [address, setAddress] = useState('')
   const [password, setPassword] = useState('')
 
   const load = async () => {
@@ -35,28 +33,35 @@ export function ApprovalApp() {
       setPhase('expired')
       return
     }
+    // Wallet identity is rendered from the request's IMMUTABLE record (the
+    // wallet shown when it was queued) — never re-read from current state,
+    // which can change under this window (external audit). GET_STATE is used
+    // only for locked/unlocked; if the ACTIVE wallet is no longer the
+    // request's wallet, the request is void (the background also enforces
+    // this at approve/secrets time — this just fails it early and clearly).
     setPending(p.pending)
     const state = await sendToBackground({ type: 'GET_STATE' })
-    if (state.ok) {
-      setWalletName(state.walletName ?? '')
-      setAddress(state.address ?? '')
-      setPhase(state.state === 'unlocked' ? 'confirm' : 'unlock')
-    } else {
+    if (!state.ok) {
       setError(state.error)
       setPhase('expired')
+      return
     }
+    const activeWallet = state.wallets?.find(w => w.active)
+    if (activeWallet && activeWallet.id !== p.pending.walletId) {
+      setError('The active wallet changed — this request is no longer valid. Retry from the site.')
+      setPhase('expired')
+      await sendToBackground({ type: 'DAPP_REJECT', reqId }).catch(() => {})
+      return
+    }
+    setPhase(state.state === 'unlocked' ? 'confirm' : 'unlock')
   }
 
   useEffect(() => { load() }, [])
 
-  // Keepalive: without messages the MV3 service worker idles out (~30s),
-  // severing the dapp's port. TOUCH every 15s keeps it warm. (The cards run
-  // their own keepalive too once mounted — harmless overlap.)
-  useEffect(() => {
-    if (phase === 'expired') return
-    const t = setInterval(() => { sendToBackground({ type: 'TOUCH' }).catch(() => {}) }, 15_000)
-    return () => clearInterval(t)
-  }, [phase])
+  // Warm the MV3 worker so the dapp's port survives a long review, WITHOUT
+  // re-arming auto-lock — only genuine input does that (external audit). The
+  // mounted card runs the same hook; the overlap is harmless.
+  useApprovalKeepalive(phase !== 'expired')
 
   const unlock = async () => {
     setBusy(true); setError('')
@@ -91,11 +96,12 @@ export function ApprovalApp() {
         <>
           <h2>{pending.method === 'bdx_sendTransaction' ? 'Transaction Request'
             : pending.method === 'bdx_signMessage' ? 'Signature Request'
+            : pending.method === 'bdx_signAuthChallenge' ? 'Sign-in Request'
             : 'Connection Request'}</h2>
           <div className="origin">{pending.origin}</div>
           <div className="card">
             <p className="muted">
-              Unlock <b>{walletName || 'your wallet'}</b> to review this request.
+              Unlock <b>{pending.walletName || 'your wallet'}</b> to review this request.
             </p>
             <input type="password" autoFocus placeholder="Password" value={password}
               onChange={e => setPassword(e.target.value)}
@@ -115,7 +121,8 @@ export function ApprovalApp() {
             reqId={reqId}
             origin={pending.origin}
             params={pending.params as unknown as SendReqParams}
-            walletName={walletName}
+            walletName={pending.walletName}
+            expect={{ walletId: pending.walletId, generation: pending.sessionGeneration }}
             onDone={() => window.close()}
           />
         ) : pending.method === 'bdx_signMessage' ? (
@@ -123,15 +130,25 @@ export function ApprovalApp() {
             reqId={reqId}
             origin={pending.origin}
             params={pending.params as unknown as SignReqParams}
-            walletName={walletName}
+            walletName={pending.walletName}
+            expect={{ walletId: pending.walletId, generation: pending.sessionGeneration }}
+            onDone={() => window.close()}
+          />
+        ) : pending.method === 'bdx_signAuthChallenge' ? (
+          <AuthSignApprovalCard
+            reqId={reqId}
+            origin={pending.origin}
+            params={pending.params as unknown as AuthSignReqParams}
+            walletName={pending.walletName}
+            expect={{ walletId: pending.walletId, generation: pending.sessionGeneration }}
             onDone={() => window.close()}
           />
         ) : (
           <ConnectApprovalCard
             reqId={reqId}
             origin={pending.origin}
-            walletName={walletName}
-            address={address}
+            walletName={pending.walletName}
+            address={pending.walletAddress}
             onDone={() => window.close()}
           />
         )

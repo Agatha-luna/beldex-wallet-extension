@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
-import { sendToBackground, WalletMeta, WalletState } from '../lib/messages'
+import { sendToBackground, PendingApproval, WalletMeta, WalletState } from '../lib/messages'
 import { Onboarding } from './views/Onboarding'
 import { Unlock } from './views/Unlock'
 import { Dashboard } from './views/Dashboard'
 import { ConnectApprovalCard } from './views/ConnectApprovalCard'
 import { SendApprovalCard, SendReqParams } from './views/SendApprovalCard'
 import { SignApprovalCard, SignReqParams } from './views/SignApprovalCard'
+import { AuthSignApprovalCard, AuthSignReqParams } from './views/AuthSignApprovalCard'
 
-interface PendingReq { reqId: string; origin: string; method: string; params?: object }
+type PendingReq = { reqId: string } & PendingApproval
 
 export function App() {
   const [state, setState] = useState<WalletState | 'loading'>('loading')
@@ -71,9 +72,13 @@ export function App() {
   }
   if (state === 'uninitialized') return <Onboarding onDone={refresh} />
   if (state === 'locked') return <Unlock walletName={walletName} wallets={wallets} onChanged={refresh} />
-  // A dapp request takes over the unlocked panel until decided.
+  // A dapp request takes over the unlocked panel until decided. Wallet
+  // identity comes from the request's IMMUTABLE record (walletName/Address
+  // captured at queue time), and send/sign bind GET_SECRETS to that record —
+  // never to whatever wallet happens to be active by approval time.
   if (pendingReq) {
     const done = () => { setPendingReq(null); refreshPending() }
+    const expect = { walletId: pendingReq.walletId, generation: pendingReq.sessionGeneration }
     return (
       <Screen>
         {pendingReq.method === 'bdx_sendTransaction' ? (
@@ -81,7 +86,8 @@ export function App() {
             reqId={pendingReq.reqId}
             origin={pendingReq.origin}
             params={pendingReq.params as unknown as SendReqParams}
-            walletName={walletName}
+            walletName={pendingReq.walletName}
+            expect={expect}
             onDone={done}
           />
         ) : pendingReq.method === 'bdx_signMessage' ? (
@@ -89,15 +95,25 @@ export function App() {
             reqId={pendingReq.reqId}
             origin={pendingReq.origin}
             params={pendingReq.params as unknown as SignReqParams}
-            walletName={walletName}
+            walletName={pendingReq.walletName}
+            expect={expect}
+            onDone={done}
+          />
+        ) : pendingReq.method === 'bdx_signAuthChallenge' ? (
+          <AuthSignApprovalCard
+            reqId={pendingReq.reqId}
+            origin={pendingReq.origin}
+            params={pendingReq.params as unknown as AuthSignReqParams}
+            walletName={pendingReq.walletName}
+            expect={expect}
             onDone={done}
           />
         ) : (
           <ConnectApprovalCard
             reqId={pendingReq.reqId}
             origin={pendingReq.origin}
-            walletName={walletName}
-            address={address}
+            walletName={pendingReq.walletName}
+            address={pendingReq.walletAddress}
             onDone={done}
           />
         )}

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Beldex Wallet",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "A light wallet for Beldex (BDX). Non-custodial: spend keys never leave your browser. Connects to Beldex dapps (bdx-web3js) with per-site approval.",
   "browser_specific_settings": {
     "gecko": {
@@ -11,7 +11,7 @@
           "none"
         ]
       },
-      "strict_min_version": "115.0"
+      "strict_min_version": "128.0"
     }
   },
   "icons": {
@@ -36,8 +36,9 @@
   "content_scripts": [
     {
       "matches": [
-        "http://*/*",
-        "https://*/*"
+        "https://*/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
       ],
       "js": [
         "inpage.js"
@@ -47,8 +48,9 @@
     },
     {
       "matches": [
-        "http://*/*",
-        "https://*/*"
+        "https://*/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
       ],
       "js": [
         "content.js"

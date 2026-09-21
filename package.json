@@ -1,17 +1,16 @@
 {
   "name": "beldex-wallet-extension",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Beldex wallet browser extension (Manifest V3) built on the Beldex LWS wasm core",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "postinstall": "patch-package",
     "build": "npm run build:chrome && npm run build:firefox",
     "build:chrome": "webpack --mode=production",
     "build:firefox": "webpack --mode=production --env firefox",
-    "package": "npm run build && bash scripts/package.sh",
+    "package": "bash scripts/package.sh",
     "build:testnet": "npm run build:chrome:testnet && npm run build:firefox:testnet",
     "build:chrome:testnet": "webpack --mode=production --env network=testnet",
     "build:firefox:testnet": "webpack --mode=production --env firefox --env network=testnet",
@@ -21,7 +20,7 @@
     "test": "node --disallow-code-generation-from-strings --experimental-strip-types --test test/*.test.mjs"
   },
   "dependencies": {
-    "@bdxi/beldex-app-bridge": "^3.0.1",
+    "@bdxi/beldex-app-bridge": "3.0.1",
     "@fontsource/michroma": "^5.2.8",
     "@fontsource/space-mono": "^5.2.9",
     "@noble/curves": "^1.9.7",
@@ -41,7 +40,6 @@
     "@types/react": "^18.2.15",
     "@types/react-dom": "^18.2.7",
     "copy-webpack-plugin": "^14.0.0",
-    "patch-package": "^8.0.1",
     "ts-loader": "^9.4.4",
     "typescript": "^5.4.0",
     "webpack": "^5.88.2",

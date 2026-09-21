@@ -13,9 +13,10 @@
 //   homograph lookalikes stay visible.
 // - What a signature does — and does not — authorise is stated plainly.
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { sendToBackground } from '../../lib/messages'
 import { signMessage } from '../../lib/signMessage'
+import { useApprovalKeepalive } from '../useApprovalKeepalive'
 
 export interface SignReqParams {
   message: string
@@ -23,21 +24,21 @@ export interface SignReqParams {
 
 type Phase = 'review' | 'signing' | 'failed'
 
-export function SignApprovalCard({ reqId, origin, params, walletName, onDone }: {
+export function SignApprovalCard({ reqId, origin, params, walletName, expect, onDone }: {
   reqId: string
   origin: string
   params: SignReqParams
   walletName: string
+  /** Immutable approval context recorded when the request was queued —
+   *  GET_SECRETS refuses if the session/wallet changed since review began. */
+  expect: { walletId: string; generation: string | null }
   onDone: () => void
 }) {
   const [phase, setPhase] = useState<Phase>('review')
   const [error, setError] = useState('')
 
-  // Keep the MV3 worker warm while the user reads (see ConnectApprovalCard).
-  useEffect(() => {
-    const t = setInterval(() => { sendToBackground({ type: 'TOUCH' }).catch(() => {}) }, 15_000)
-    return () => clearInterval(t)
-  }, [])
+  // Warm the worker without re-arming auto-lock (see ConnectApprovalCard).
+  useApprovalKeepalive()
 
   const reject = async () => {
     await sendToBackground({ type: 'DAPP_REJECT', reqId })
@@ -47,8 +48,8 @@ export function SignApprovalCard({ reqId, origin, params, walletName, onDone }: 
   const approve = async () => {
     setPhase('signing'); setError('')
     try {
-      const s = await sendToBackground({ type: 'GET_SECRETS' })
-      if (!s.ok || !s.secrets) throw new Error('Wallet is locked — unlock and try again.')
+      const s = await sendToBackground({ type: 'GET_SECRETS', expect })
+      if (!s.ok || !s.secrets) throw new Error(s.ok ? 'Wallet is locked — unlock and try again.' : s.error)
 
       const { signature, pubkey } = signMessage(
         params.message, s.secrets.secSpendKey, s.secrets.pubSpendKey

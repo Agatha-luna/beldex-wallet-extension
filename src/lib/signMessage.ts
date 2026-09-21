@@ -181,10 +181,23 @@ export function checkSignature(prefixHash: Uint8Array, pub: Uint8Array, sig: Uin
   if (prefixHash.length !== 32 || pub.length !== 32 || sig.length !== 64) return false
   let A
   try {
-    A = ed25519.ExtendedPoint.fromHex(pub)
+    A = ed25519.ExtendedPoint.fromHex(pub) // rejects off-curve / non-canonical encodings
   } catch {
     return false // not a curve point
   }
+  // WEAK-KEY REJECTION (external audit). An ownership proof must establish
+  // knowledge of a secret spend scalar. For the identity point A=O, the verify
+  // equation c·A + r·G reduces to r·G, so an attacker picks r, derives the
+  // challenge, and forges an accepted proof with no secret. Any point carrying
+  // a torsion (small-order) component similarly weakens the required
+  // discrete-log assumption. Require A to be the identity's opposite: a
+  // non-identity point in the prime-order subgroup (torsion-free). A genuine
+  // wallet key a·G (a∈[1,ℓ)) always satisfies this, so honest verification is
+  // unaffected. The signer's zero-scalar checks cannot protect a *public*
+  // verifier handed an attacker-chosen key, so the gate must live here.
+  if (A.equals(ed25519.ExtendedPoint.ZERO)) return false // identity
+  if (!A.isTorsionFree()) return false                   // small-order / mixed-order component
+
   const c = bytesToNumberLE(sig.subarray(0, 32))
   const r = bytesToNumberLE(sig.subarray(32))
   if (c >= L || r >= L || c === 0n) return false // sc_check + sc_isnonzero
@@ -200,6 +213,11 @@ export function checkSignature(prefixHash: Uint8Array, pub: Uint8Array, sig: Uin
 
 /** Verify a "SigV1…" signature over `message` against a spend public key. */
 export function verifyMessage(message: string, pubSpendKey: string, signature: string): boolean {
+  // Defense in depth (external audit): bound work before Keccak/base58 even if
+  // a caller bypasses the dapp-bridge boundary schema. A real SigV1 is ~100
+  // chars and challenges are short; these caps are generous.
+  if (typeof message !== 'string' || message.length > 65_536) return false
+  if (typeof signature !== 'string' || signature.length > 4096) return false
   const sig = signature.trim()
   if (!sig.startsWith(SIG_MAGIC)) return false
   let raw: Uint8Array
@@ -220,6 +238,9 @@ export function verifyMessage(message: string, pubSpendKey: string, signature: s
 // the Emscripten glue cannot load.
 
 export function addressSpendKey(address: string): string | null {
+  // Bound base58 work before decoding (external audit). Real addresses are
+  // ~95-110 chars; anything far beyond that is not an address.
+  if (typeof address !== 'string' || address.length > 512) return null
   let raw: Uint8Array
   try {
     raw = base58Decode(address.trim())

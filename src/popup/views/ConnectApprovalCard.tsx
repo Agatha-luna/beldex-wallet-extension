@@ -6,8 +6,9 @@
 // (ASCII/punycode form) — deliberately NOT decoded to unicode, so homograph
 // lookalikes (xn--…) stay visible.
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { sendToBackground } from '../../lib/messages'
+import { useApprovalKeepalive } from '../useApprovalKeepalive'
 
 export function ConnectApprovalCard({ reqId, origin, walletName, address, onDone }: {
   reqId: string
@@ -19,14 +20,9 @@ export function ConnectApprovalCard({ reqId, origin, walletName, address, onDone
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
-  // Keepalive: the MV3 service worker idles out after ~30s without messages,
-  // which would sever the dapp's port and lose the pending request's reply
-  // channel while the user reads this screen. TOUCH every 15s keeps it warm
-  // (and re-arms auto-lock, appropriate while the user is actively deciding).
-  useEffect(() => {
-    const t = setInterval(() => { sendToBackground({ type: 'TOUCH' }).catch(() => {}) }, 15_000)
-    return () => clearInterval(t)
-  }, [])
+  // Keep the MV3 worker warm (so the dapp's port survives a long review)
+  // WITHOUT re-arming auto-lock; only genuine input in this surface does that.
+  useApprovalKeepalive()
 
   const decide = async (approve: boolean) => {
     setBusy(true); setError('')

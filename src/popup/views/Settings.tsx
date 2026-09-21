@@ -296,7 +296,11 @@ export function Settings({ walletName, onBack, onWiped, onChanged, onLock, onReg
     return (
       <div className="card">
         <h2>Auto-Lock</h2>
-        <p className="muted">Lock the wallet after this long without activity.</p>
+        <p className="muted">
+          Lock the wallet after this long without activity. Only your own
+          interaction (clicks, typing, focusing a wallet window) counts —
+          a dApp request waiting for approval will not keep it unlocked.
+        </p>
         <div className="row" style={{ marginBottom: 10 }}>
           {AUTOLOCK_OPTIONS.map(m => (
             <button key={m} className={autoLock === m ? 'btn-primary' : 'btn-ghost'} onClick={() => pick(m)}>

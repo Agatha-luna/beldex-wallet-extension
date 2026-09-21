@@ -4,6 +4,12 @@
 // The server scans the chain with your *view* key; spend keys never leave the client.
 
 import { CONFIG } from './config'
+import { fetchJson, HTTP } from './http'
+
+// Endpoints that BROADCAST get the long submit deadline; everything else is a
+// bounded read. Aborting a broadcast early would manufacture an unknown outcome
+// (see the send operation state machine), so /submit_raw_tx is given room.
+const SUBMIT_ENDPOINTS = new Set(['/submit_raw_tx'])
 
 /** Verbatim POST used by the send flow — the WASM builds these request bodies itself. */
 export function rawPost<T = any>(endpoint: string, body: unknown): Promise<T> {
@@ -11,13 +17,12 @@ export function rawPost<T = any>(endpoint: string, body: unknown): Promise<T> {
 }
 
 async function post<T>(endpoint: string, body: unknown): Promise<T> {
-  const res = await fetch(`${CONFIG.LWS_URL}${endpoint}`, {
+  const budget = SUBMIT_ENDPOINTS.has(endpoint) ? HTTP.LWS_SUBMIT : HTTP.LWS_READ
+  return fetchJson<T>(`${CONFIG.LWS_URL}${endpoint}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
-  })
-  if (!res.ok) throw new Error(`LWS ${endpoint} failed: ${res.status}`)
-  return res.json()
+  }, budget)
 }
 
 export interface Credentials {

@@ -157,6 +157,10 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
   const [hashCopied, setHashCopied] = useState(false)
   const copyTimer = useRef<ReturnType<typeof setTimeout>>()
   const secretsRef = useRef<WalletSecrets | null>(null)
+  // Single-flight guard (external audit): the 10s poll must not start a second
+  // refresh while one is still in flight — a slow/hanging LWS would otherwise
+  // accumulate overlapping fetches. Each fetch is also bounded by its deadline.
+  const refreshInFlight = useRef(false)
 
   // HF22 privacy tokens
   // "" = BDX; anything else is a token id. Drives the unit everywhere in the
@@ -276,6 +280,8 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
   }
 
   const refresh = async (c: lws.Credentials) => {
+    if (refreshInFlight.current) return
+    refreshInFlight.current = true
     setRefreshing(true)
     getBdxPriceUsdt().then(p => p !== null && setPrice(p)) // 60s-cached; fire-and-forget
     try {
@@ -342,6 +348,7 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
     } catch (e: any) {
       setError(`rpc node unreachable (${e.message}) — retrying…`)
     } finally {
+      refreshInFlight.current = false
       setRefreshing(false)
       setLoadedOnce(true)
     }
@@ -571,6 +578,7 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
       setSendError(lock.error); setSendPhase('error'); setSending(false)
       return
     }
+    const lockOwner = lock.lockOwner // release only our own lock
     try {
       const s = await sendToBackground({ type: 'GET_SECRETS' })
       if (!s.ok || !s.secrets) { onLocked(); return }
@@ -635,7 +643,7 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
       setSendPhase('error')
     } finally {
       setSending(false)
-      await sendToBackground({ type: 'SEND_LOCK_RELEASE' }).catch(() => {})
+      await sendToBackground({ type: 'SEND_LOCK_RELEASE', owner: lockOwner }).catch(() => {})
     }
   }
 

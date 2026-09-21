@@ -17,6 +17,7 @@ import { getBridge } from '../../lib/bridge'
 import { rawPost, getAddressInfo } from '../../lib/lws'
 import { correctedTotalSent } from '../../lib/spent'
 import { sessionStore } from '../../lib/sessionStore'
+import { useApprovalKeepalive } from '../useApprovalKeepalive'
 import type { WalletSecrets } from '../../lib/messages'
 
 export interface SendReqParams {
@@ -61,11 +62,14 @@ function displayUnits(atomic: bigint): string {
 
 type Phase = 'review' | 'signing' | 'success' | 'failed'
 
-export function SendApprovalCard({ reqId, origin, params, walletName, onDone }: {
+export function SendApprovalCard({ reqId, origin, params, walletName, expect, onDone }: {
   reqId: string
   origin: string
   params: SendReqParams
   walletName: string
+  /** Immutable approval context recorded when the request was queued —
+   *  GET_SECRETS refuses if the session/wallet changed since review began. */
+  expect: { walletId: string; generation: string | null }
   onDone: () => void
 }) {
   const [phase, setPhase] = useState<Phase>('review')
@@ -85,7 +89,7 @@ export function SendApprovalCard({ reqId, origin, params, walletName, onDone }: 
     let stop = false
     ;(async () => {
       try {
-        const s = await sendToBackground({ type: 'GET_SECRETS' })
+        const s = await sendToBackground({ type: 'GET_SECRETS', expect })
         if (!s.ok || !s.secrets) return
         // Current network fee rates ride along on /get_unspent_outs
         // (wallet_light_rpc.h GET_UNSPENT_OUTS: per_byte_fee / per_kb_fee).
@@ -106,13 +110,10 @@ export function SendApprovalCard({ reqId, origin, params, walletName, onDone }: 
     return () => { stop = true }
   }, [phase])
 
-  // Keepalive: the signing flow + user reading time must outlive the MV3
-  // service worker's ~30s idle timeout, or the dapp's reply channel dies.
-  useEffect(() => {
-    if (phase === 'success' || phase === 'failed') return
-    const t = setInterval(() => { sendToBackground({ type: 'TOUCH' }).catch(() => {}) }, 15_000)
-    return () => clearInterval(t)
-  }, [phase])
+  // Keep the MV3 worker warm through the review + signing flow (so the dapp's
+  // reply channel survives) WITHOUT re-arming auto-lock; only real input does
+  // that (external audit). Stops once the send is fully settled.
+  useApprovalKeepalive(phase !== 'success' && phase !== 'failed')
 
   const reject = async () => {
     await sendToBackground({ type: 'DAPP_REJECT', reqId })
@@ -124,9 +125,23 @@ export function SendApprovalCard({ reqId, origin, params, walletName, onDone }: 
     // Global single-flight send lock (shared with the panel's own send flow).
     const lock = await sendToBackground({ type: 'SEND_LOCK_ACQUIRE' })
     if (!lock.ok) { setError(lock.error); setPhase('review'); return }
+    const lockOwner = lock.lockOwner // present this token to release only our lock
+    // Atomic PENDING -> EXECUTING BEFORE any construction (external audit):
+    // this cancels the review timer and mints the execution token, so the
+    // transaction can no longer be terminated by an approval timeout while it
+    // broadcasts, and its outcome is recoverable if the channel dies.
+    let operationId = ''
+    let executionToken = ''
     try {
-      const s = await sendToBackground({ type: 'GET_SECRETS' })
-      if (!s.ok || !s.secrets) throw new Error('Wallet locked — unlock and retry')
+      const begin = await sendToBackground({ type: 'DAPP_BEGIN_SEND', reqId })
+      if (!begin.ok) throw new Error(begin.error)
+      operationId = begin.operationId ?? ''
+      executionToken = begin.executionToken ?? ''
+
+      // Bound fetch: fails if the wallet or session changed since this card
+      // was rendered — the tx must be built with the DISPLAYED wallet's keys.
+      const s = await sendToBackground({ type: 'GET_SECRETS', expect })
+      if (!s.ok || !s.secrets) throw new Error(s.ok ? 'Wallet locked — unlock and retry' : s.error)
 
       const r = await sendFunds({
         secrets: s.secrets,
@@ -152,17 +167,31 @@ export function SendApprovalCard({ reqId, origin, params, walletName, onDone }: 
       // it, the raw LWS figures would collapse the dapp-visible balance to
       // zero until the panel's next correction pass.
       await publishCorrectedBalance(s.secrets).catch(() => {})
+      // Records the broadcast outcome (durable) before replying to the dapp.
       await sendToBackground({
-        type: 'DAPP_COMPLETE', reqId, result: { txHash: r.tx_hash, fee: String(paidFee) }
+        type: 'DAPP_COMPLETE', reqId, operationId, executionToken,
+        result: { txHash: r.tx_hash, fee: String(paidFee) }
       })
       setPhase('success')
     } catch (e: any) {
       // Full reason stays HERE in the wallet; the dapp gets a sanitized error.
-      setError(e?.message ?? 'Transaction failed')
-      await sendToBackground({ type: 'DAPP_FAIL', reqId }).catch(() => {})
+      const msg = e?.message ?? 'Transaction failed'
+      // A timeout once the SUBMIT step (code 5) has begun is an UNKNOWN outcome —
+      // the tx may have broadcast. Don't record the operation as failed (that
+      // would permit an idempotent retry / duplicate payment); leave it
+      // executing so the dapp must resolve it via bdx_getOperationStatus.
+      const unknownOutcome = /timed out|aborted/i.test(msg) && stepCode >= 5
+      if (unknownOutcome) setError('Transaction sent but its outcome is unconfirmed — check history before retrying.')
+      else setError(msg)
+      // Pass the token so a post-begin failure is recorded (failed, unless the
+      // outcome is unknown). Pre-begin failures have no token.
+      await sendToBackground({
+        type: 'DAPP_FAIL', reqId,
+        ...(operationId && executionToken ? { operationId, executionToken, unknown: unknownOutcome } : {})
+      }).catch(() => {})
       setPhase('failed')
     } finally {
-      await sendToBackground({ type: 'SEND_LOCK_RELEASE' }).catch(() => {})
+      await sendToBackground({ type: 'SEND_LOCK_RELEASE', owner: lockOwner }).catch(() => {})
     }
   }
 
