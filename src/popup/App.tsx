@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { sendToBackground, PendingApproval, WalletMeta, WalletState } from '../lib/messages'
+import { DEFAULT_NETWORK, setActiveNetwork } from '../lib/config'
+import type { NetworkName } from '../lib/config'
 import { Onboarding } from './views/Onboarding'
 import { Unlock } from './views/Unlock'
 import { Dashboard } from './views/Dashboard'
@@ -15,6 +17,7 @@ export function App() {
   const [address, setAddress] = useState<string>('')
   const [walletName, setWalletName] = useState<string>('')
   const [wallets, setWallets] = useState<WalletMeta[]>([])
+  const [network, setNetwork] = useState<NetworkName>(DEFAULT_NETWORK)
   const [error, setError] = useState<string>('')
   // Dapp approval request waiting on the user (shown in-panel, MetaMask-style).
   const [pendingReq, setPendingReq] = useState<PendingReq | null>(null)
@@ -30,6 +33,12 @@ export function App() {
     try {
       const r = await sendToBackground({ type: 'GET_STATE' })
       if (r.ok && r.state) {
+        // Point CONFIG at the active wallet's chain BEFORE any child renders or
+        // fetches. The background is the authority on which network is
+        // selected; the panel only mirrors it, so the UI and the endpoints it
+        // talks to can never disagree.
+        setActiveNetwork(r.network)
+        setNetwork(r.network ?? DEFAULT_NETWORK)
         setError('')
         setState(r.state)
         setAddress(r.address ?? '')
@@ -120,8 +129,19 @@ export function App() {
       </Screen>
     )
   }
-  // key= forces a clean remount when switching between wallets
-  return <Dashboard key={address} address={address} walletName={walletName} wallets={wallets} onLocked={refresh} />
+  // key= forces a clean remount when switching between wallets OR networks:
+  // every cached balance, tx list and token row belongs to one chain, and the
+  // remount re-runs the LWS login that registers this address on the new one.
+  return (
+    <Dashboard
+      key={`${network}:${address}`}
+      address={address}
+      walletName={walletName}
+      wallets={wallets}
+      network={network}
+      onLocked={refresh}
+    />
+  )
 }
 
 export function Screen({ children }: { children: React.ReactNode }) {

@@ -4,10 +4,12 @@ import { truncateUnlessTab } from '../../lib/format'
 import { copySecret, clearSecretNow } from '../../lib/clipboard'
 import { closePanel } from '../../lib/platform'
 import { useConnectedSites, UnlinkIcon } from './ConnectedSitesBadge'
+import { CONFIG, NETWORKS, NETWORK_NAMES } from '../../lib/config'
+import type { NetworkName } from '../../lib/config'
 
 const REVEAL_SECONDS = 30 // revealed secrets auto-hide after this long
 
-type Item = 'menu' | 'seed' | 'viewKey' | 'spendKey' | 'password' | 'autolock' | 'rename' | 'delete' | 'sites'
+type Item = 'menu' | 'seed' | 'viewKey' | 'spendKey' | 'password' | 'autolock' | 'rename' | 'delete' | 'sites' | 'network'
 
 const AUTOLOCK_OPTIONS = [5, 15, 30, 60] // minutes
 
@@ -51,6 +53,9 @@ function ClockIcon() {
 function BellIcon() {
   return <svg {...ICON_PROPS}><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.7 21a2 2 0 0 1-3.4 0" /></svg>
 }
+function GlobeIcon() {
+  return <svg {...ICON_PROPS}><circle cx="12" cy="12" r="9" /><path d="M3 12h18" /><path d="M12 3c2.5 3 2.5 15 0 18M12 3c-2.5 3-2.5 15 0 18" /></svg>
+}
 function LinkIcon() {
   return <svg {...ICON_PROPS}><path d="M10 13a5 5 0 0 0 7.5.4l2-2a5 5 0 0 0-7-7l-1.2 1.1" /><path d="M14 11a5 5 0 0 0-7.5-.4l-2 2a5 5 0 0 0 7 7l1.1-1.1" /></svg>
 }
@@ -85,8 +90,18 @@ const SECRET_LABELS: Record<string, { title: string; field: keyof WalletSecrets;
   }
 }
 
-export function Settings({ walletName, onBack, onWiped, onChanged, onLock, onRegisterToken }:
-  { walletName: string; onBack: () => void; onWiped: () => void; onChanged: () => void; onLock: () => void; onRegisterToken: () => void }) {
+export function Settings({
+  walletName, network,
+  onBack, onWiped, onChanged, onLock, onRegisterToken
+}: {
+  walletName: string
+  network: NetworkName
+  onBack: () => void
+  onWiped: () => void
+  onChanged: () => void
+  onLock: () => void
+  onRegisterToken: () => void
+}) {
   const [item, setItem] = useState<Item>('menu')
   const [password, setPassword] = useState('')
   const [revealed, setRevealed] = useState<WalletSecrets | null>(null)
@@ -320,6 +335,19 @@ export function Settings({ walletName, onBack, onWiped, onChanged, onLock, onReg
     return <ConnectedSites walletName={walletName} onBack={() => go('menu')} />
   }
 
+  // ---- network ----
+  if (item === 'network') {
+    return (
+      <ManageNetwork
+        walletName={walletName}
+        network={network}
+        onBack={() => go('menu')}
+        onChanged={onChanged}
+        onDeclined={onBack}
+      />
+    )
+  }
+
   // ---- delete wallet ----
   if (item === 'delete') {
     return (
@@ -376,6 +404,17 @@ export function Settings({ walletName, onBack, onWiped, onChanged, onLock, onReg
           <span className="chev">›</span>
         </div>
       )}
+
+      <div className="settings-divider" />
+      <div className="settings-section-label">Network</div>
+      <div className="settings-item" onClick={() => go('network')}>
+        <span className="icon"><GlobeIcon /></span>
+        <span className="label">Manage Network</span>
+        <span className={CONFIG.IS_TESTNET ? 'net-badge' : 'muted'} style={{ fontSize: 10, marginRight: 6 }}>
+          {NETWORKS[network].label}
+        </span>
+        <span className="chev">›</span>
+      </div>
 
       <div className="settings-divider" />
       <div className="settings-section-label">Wallet</div>
@@ -478,6 +517,142 @@ function ConnectedSites({ walletName, onBack }: { walletName: string; onBack: ()
         </div>
       ))}
       <button className="btn-ghost" style={{ width: '100%', marginTop: 12 }} onClick={onBack}>Back</button>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------- network
+//
+// Just the chain switch. Which wallets exist where is decided in wallet
+// selection, where the wallets actually are — putting it here too would be two
+// places to keep straight for one idea.
+//
+// No password: switching reveals nothing and spends nothing — it re-encodes an
+// address the session already holds. It is still confirmed, so the consequences
+// are stated before the chain moves.
+function ManageNetwork({ walletName, network, onBack, onChanged, onDeclined }: {
+  walletName: string
+  network: NetworkName
+  onBack: () => void
+  onChanged: () => void
+  /** Declined bringing the wallet across: leave Settings entirely and return to
+   *  the wallet, on the chain we never left. */
+  onDeclined: () => void
+}) {
+  const [target, setTarget] = useState<NetworkName | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  // Set when the background reports this wallet is not on the target chain.
+  // Switching then needs an explicit yes to bring it along; declining must
+  // leave the user where they are rather than moving them to another wallet.
+  const [needsWallet, setNeedsWallet] = useState(false)
+
+  const reset = () => { setTarget(null); setError(''); setNeedsWallet(false) }
+
+  const doSwitch = async (addActiveWallet = false) => {
+    if (!target || busy) return
+    setBusy(true); setError('')
+    try {
+      const r = await sendToBackground({
+        type: 'SWITCH_NETWORK', network: target,
+        ...(addActiveWallet ? { addActiveWallet: true } : {})
+      })
+      if (!r.ok) {
+        // Asked only when it applies, so the common path stays a plain switch.
+        if (r.code === 'WALLET_NOT_ON_NETWORK') { setNeedsWallet(true); setError('') }
+        else setError(r.error)
+        return
+      }
+      onChanged() // re-reads GET_STATE, re-points CONFIG, remounts on the new chain
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not switch network')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // ---- confirm ----
+  if (target) {
+    return (
+      <div className="card">
+        <div className="settings-header" style={{ paddingLeft: 0, paddingRight: 0, marginLeft: -16 }}>
+          <button className="settings-back" title="Back" onClick={reset}><ChevronLeftIcon size={22} /></button>
+          <h2>Switch to {NETWORKS[target].label}</h2>
+        </div>
+
+        <div style={{
+          border: '1px solid var(--border)', borderLeft: '3px solid #E8A33D',
+          borderRadius: 6, padding: '10px 12px', margin: '0 0 12px', background: '#0d0d0d'
+        }}>
+          <p className="muted" style={{ margin: 0, lineHeight: 1.55 }}>
+            <b style={{ color: '#E8A33D' }}>Your receiving address changes.</b> Same account, same
+            seed — written for a different chain. Any address saved or shared elsewhere will
+            <b> not</b> apply on {NETWORKS[target].label}.
+          </p>
+          <p className="muted" style={{ margin: '8px 0 0', lineHeight: 1.55 }}>
+            This is a light wallet: {NETWORKS[target].label} is tracked from the moment you switch,
+            so a balance already there may <b>not appear automatically</b>.
+          </p>
+          {target !== 'mainnet' ? (
+            <p className="muted" style={{ margin: '8px 0 0', lineHeight: 1.55 }}>
+              <b style={{ color: '#E8A33D' }}>{NETWORKS[target].label} coins have no value.</b>
+            </p>
+          ) : (
+            <p className="muted" style={{ margin: '8px 0 0', lineHeight: 1.55 }}>
+              <b style={{ color: 'var(--green)' }}>Mainnet is real money.</b> Sends spend real BDX.
+            </p>
+          )}
+        </div>
+
+        {needsWallet && (
+          <p className="warn" style={{ marginTop: 0, lineHeight: 1.5 }}>
+            <b>{walletName || 'This wallet'}</b> is not on {NETWORKS[target].label}. Add it to
+            {' '}{NETWORKS[target].label} to continue? It is the same account and the same seed —
+            it gets that chain's address.
+          </p>
+        )}
+
+        {error && <p className="error">{error}</p>}
+        <div className="row" style={{ marginTop: 12 }}>
+          {/* Declining does not switch. The user goes back to their wallet on
+              the chain they were already on, rather than being left in Settings
+              wondering whether anything happened. */}
+          <button className="btn-ghost" disabled={busy} onClick={needsWallet ? onDeclined : reset}>
+            {needsWallet ? 'No, stay here' : 'Cancel'}
+          </button>
+          <button className="btn-primary" autoFocus disabled={busy} onClick={() => doSwitch(needsWallet)}>
+            {busy
+              ? 'Switching…'
+              : needsWallet
+                ? `Add and switch`
+                : `Switch to ${NETWORKS[target].label}`}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // ---- pick ----
+  return (
+    <div className="card" style={{ padding: '8px 0' }}>
+      <div className="settings-header">
+        <button className="settings-back" title="Back" onClick={onBack}><ChevronLeftIcon /></button>
+        <h2>Network</h2>
+      </div>
+      {NETWORK_NAMES.map(n => {
+        const active = n === network
+        return (
+          <div className="settings-item" key={n}
+            onClick={() => { if (!active) { setError(''); setNeedsWallet(false); setTarget(n) } }}>
+            <span className="icon">{active ? <b className="ok">●</b> : ''}</span>
+            <span className="label">{NETWORKS[n].label}</span>
+            {!active && <span className="chev">›</span>}
+          </div>
+        )
+      })}
+      <p className="muted" style={{ padding: '8px 16px 0', lineHeight: 1.5 }}>
+        It is the same account on every chain — only the address encoding differs.
+      </p>
     </div>
   )
 }

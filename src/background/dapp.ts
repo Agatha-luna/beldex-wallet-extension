@@ -15,7 +15,8 @@
 // (-32603) and the page can simply call connect() again — if the user approved
 // meanwhile, the persisted grant resolves it instantly with no UI.
 
-import { CONFIG } from '../lib/config'
+import { CONFIG, DEFAULT_NETWORK, activeNetwork, isNetworkName, setActiveNetwork } from '../lib/config'
+import type { NetworkName } from '../lib/config'
 import * as lws from '../lib/lws'
 import { resolveBnsWallet, looksLikeBnsName } from '../lib/bns'
 import { sessionStore } from '../lib/sessionStore'
@@ -30,6 +31,7 @@ import type { WalletSecrets } from '../lib/messages'
 // Storage keys shared with background/index.ts — keep in sync.
 const WALLETS_KEY = 'wallets'
 const ACTIVE_KEY = 'active_wallet_id'
+const ACTIVE_NET_KEY = 'active_network'   // global; written by background/index.ts
 const SESSION_KEY = 'session_secrets'
 const CACHE_KEY = 'sync_cache'
 
@@ -128,6 +130,10 @@ interface PendingMeta {
    *  queued while locked, reviewed after the unlock the approval surface
    *  itself performs); the walletId binding still applies. */
   sessionGeneration: string | null
+  /** Chain this request was drawn against. Part of the same immutable context:
+   *  the address, balance and fee under review are meaningless on another
+   *  network, so switching voids the request (dappInvalidateForNetwork). */
+  network: NetworkName
 }
 
 interface PendingLive extends PendingMeta {
@@ -162,7 +168,30 @@ const readStamps = new Map<string, number[]>()       // origin -> request times
 
 // ---- small wallet-store readers (same keys as background/index.ts) ---------
 
-interface StoredWallet { name: string; address: string }
+// Mirrors background/index.ts's StoredWallet (the authoritative writer).
+interface StoredWallet {
+  name: string
+  address: string
+  addresses?: Partial<Record<NetworkName, string>>
+  /** Networks this wallet appears on. `network` is the superseded single-value
+   *  form, still read so a wallet written by an older version resolves. */
+  networks?: NetworkName[]
+  network?: NetworkName
+}
+
+function walletNetworks(w: StoredWallet | undefined): NetworkName[] {
+  if (!w) return []
+  const list = (w.networks ?? []).filter(isNetworkName)
+  if (list.length) return list
+  return [isNetworkName(w.network) ? w.network : DEFAULT_NETWORK]
+}
+
+/** This wallet's address on `network` — never the raw stored `address`, which
+ *  belongs to whichever chain the wallet was created on. */
+function walletAddress(w: StoredWallet | undefined, network: NetworkName): string {
+  if (!w) return ''
+  return w.addresses?.[network] ?? (walletNetworks(w)[0] === network ? w.address : '')
+}
 
 async function getWallets(): Promise<Record<string, StoredWallet>> {
   return (await chrome.storage.local.get(WALLETS_KEY))[WALLETS_KEY] ?? {}
@@ -212,8 +241,24 @@ async function updateGrants(mutate: (g: GrantMap) => boolean): Promise<void> {
   })
 }
 
-function nettype(): 'mainnet' | 'testnet' {
+function nettype(): NetworkName {
   return CONFIG.NETWORK
+}
+
+/** Point CONFIG at the active wallet's chain before serving a dapp request.
+ *  Port traffic does not pass through background/index.ts's handle(), and the
+ *  MV3 worker may have restarted since the selection was made, so this runs at
+ *  the top of every port dispatch — otherwise a woken worker could answer
+ *  bdx_getNetwork, or fetch a balance, for the wrong chain. */
+async function hydrateNetwork(): Promise<NetworkName> {
+  // The active network is a GLOBAL setting written by background/index.ts — not
+  // a property of the active wallet. Reading it from the wallet (as this used
+  // to) left the dapp bridge answering for the wrong chain after a switch.
+  const stored = (await chrome.storage.local.get(ACTIVE_NET_KEY))[ACTIVE_NET_KEY]
+  if (isNetworkName(stored)) return setActiveNetwork(stored)
+  // Not yet migrated: fall back to the active wallet's own chain.
+  const [wallets, activeId] = await Promise.all([getWallets(), getActiveId()])
+  return setActiveNetwork(walletNetworks(activeId ? wallets[activeId] : undefined)[0] ?? DEFAULT_NETWORK)
 }
 
 function err(code: number, message: string): { code: number; message: string } {
@@ -359,6 +404,27 @@ export async function dappInvalidateOnSessionEnd(): Promise<void> {
  *  grant) with a different wallet's keys. */
 export async function dappInvalidateForWallet(activeId: string): Promise<void> {
   await rejectPendingWhere(m => m.walletId !== activeId, 'wallet changed — request cancelled')
+}
+
+/** The active network changed: every approval queued on another chain is void.
+ *  The address, balance and fee a user reviewed are all chain-specific, so an
+ *  approval drawn on one network must never execute on another — including a
+ *  connect approval, whose card displays an address that is only valid for the
+ *  chain it was rendered on. */
+export async function dappInvalidateForNetwork(network: NetworkName): Promise<void> {
+  await rejectPendingWhere(m => m.network !== network, 'network changed — request cancelled')
+}
+
+/**
+ * The active wallet moved to another chain. Grants deliberately SURVIVE: the
+ * account is the same keypair on every network and the user did not revoke
+ * anything, so the connection stands and the site is simply told what changed.
+ * Both events fire because both facts changed — the chain, and the address
+ * that names this account on it.
+ */
+export async function dappNotifyNetworkChanged(walletId: string, address: string): Promise<void> {
+  await broadcast('networkChanged', { network: nettype() }, walletId)
+  await broadcast('accountsChanged', { address }, walletId)
 }
 
 // ---- balance ---------------------------------------------------------------
@@ -896,6 +962,11 @@ async function handleMethod(
   const reply = (result: unknown) => respond({ id: req.id, result })
   const fail = (e: { code: number; message: string }) => respond({ id: req.id, error: e })
 
+  // Every answer below is chain-specific (address, balance, fee, nettype), and
+  // this worker may have woken with no in-memory selection — bind to the
+  // active wallet's network before dispatching.
+  await hydrateNetwork()
+
   switch (req.method) {
     case 'bdx_getState': {
       // Rate-limited (was a free service-worker keep-alive and
@@ -982,7 +1053,7 @@ async function handleMethod(
       // Idempotent once granted (spec §4.1) — even while locked this reveals
       // nothing new to an origin the user already approved for this wallet.
       if (await grantedActiveId(origin)) {
-        return reply({ address: wallets[activeId].address, network: nettype() })
+        return reply({ address: walletAddress(wallets[activeId], nettype()), network: nettype() })
       }
       // One pending approval per origin (spec §7.4), admitted atomically.
       // Generation is null: connect may legitimately be approved after the
@@ -1130,6 +1201,7 @@ async function queueApproval(
   const reqId = crypto.randomUUID()
   const meta: PendingMeta = {
     origin, method, createdAt: Date.now(), walletId, sessionGeneration,
+    network: activeNetwork(), // hydrated by the port handler before dispatch
     ...(params !== undefined ? { params } : {})
   }
   const timer = setTimeout(async () => {
@@ -1201,14 +1273,18 @@ export async function dappFirstPending(): Promise<
 async function pendingView(meta: PendingMeta): Promise<{
   origin: string; method: string; params?: object
   walletId: string; sessionGeneration: string | null
-  walletName: string; walletAddress: string
+  walletName: string; walletAddress: string; network: NetworkName
 }> {
   const w = (await getWallets())[meta.walletId]
+  // The address shown is the one for the network RECORDED on the request, for
+  // the same reason the wallet identity is: the card must describe the context
+  // the request was made in, not whatever is selected at render time.
   return {
     origin: meta.origin, method: meta.method,
     ...(meta.params !== undefined ? { params: meta.params } : {}),
     walletId: meta.walletId, sessionGeneration: meta.sessionGeneration,
-    walletName: w?.name ?? '', walletAddress: w?.address ?? ''
+    walletName: w?.name ?? '', walletAddress: walletAddress(w, meta.network),
+    network: meta.network
   }
 }
 

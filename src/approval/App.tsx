@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from 'react'
 import { sendToBackground, PendingApproval } from '../lib/messages'
+import { NETWORKS, setActiveNetwork } from '../lib/config'
 import { useApprovalKeepalive } from '../popup/useApprovalKeepalive'
 import { ConnectApprovalCard } from '../popup/views/ConnectApprovalCard'
 import { SendApprovalCard, SendReqParams } from '../popup/views/SendApprovalCard'
@@ -40,6 +41,12 @@ export function ApprovalApp() {
     // request's wallet, the request is void (the background also enforces
     // this at approve/secrets time — this just fails it early and clearly).
     setPending(p.pending)
+    // Bind this window to the chain the request was DRAWN on, not to whatever
+    // is selected now — same immutable-context rule as the wallet identity.
+    // Without this the card would estimate a fee, and build a transaction,
+    // against the build's default network (this window is a fresh context and
+    // hydrates nothing on its own).
+    setActiveNetwork(p.pending.network)
     const state = await sendToBackground({ type: 'GET_STATE' })
     if (!state.ok) {
       setError(state.error)
@@ -49,6 +56,15 @@ export function ApprovalApp() {
     const activeWallet = state.wallets?.find(w => w.active)
     if (activeWallet && activeWallet.id !== p.pending.walletId) {
       setError('The active wallet changed — this request is no longer valid. Retry from the site.')
+      setPhase('expired')
+      await sendToBackground({ type: 'DAPP_REJECT', reqId }).catch(() => {})
+      return
+    }
+    // Likewise for the chain: an approval reviewed on one network must never
+    // execute on another. The background voids pending approvals on a switch;
+    // this fails the window early and says why.
+    if (state.network && state.network !== p.pending.network) {
+      setError('The network changed — this request is no longer valid. Retry from the site.')
       setPhase('expired')
       await sendToBackground({ type: 'DAPP_REJECT', reqId }).catch(() => {})
       return
@@ -80,7 +96,14 @@ export function ApprovalApp() {
 
   return (
     <div className="wrap">
-      <div className="brand"><img src="icons/logo.svg" alt="" />Beldex</div>
+      <div className="brand">
+        <img src="icons/logo.svg" alt="" />Beldex
+        {/* Which chain this request will execute on, taken from the request's
+            own record. A site asking to spend must never be ambiguous about it. */}
+        {pending && pending.network !== 'mainnet' && (
+          <span className="net-badge">{NETWORKS[pending.network]?.label ?? pending.network}</span>
+        )}
+      </div>
 
       {phase === 'loading' && <p className="muted center">Loading…</p>}
 

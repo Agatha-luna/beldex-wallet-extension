@@ -16,7 +16,8 @@ import { getPidLabels } from '../../lib/pidLabels'
 import { looksLikeBnsName, resolveBnsWallet } from '../../lib/bns'
 import { decodeAddress, tokenRegistrationInfo, TokenRegistrationInfo } from '../../lib/bridge'
 import { sessionStore } from '../../lib/sessionStore'
-import { CONFIG } from '../../lib/config'
+import { CONFIG, NETWORKS, NETWORK_NAMES } from '../../lib/config'
+import type { NetworkName } from '../../lib/config'
 import { getTokenBalances, fetchAllTokenOutputs, isTokenLookupUnsupported } from '../../lib/tokenApi'
 import { fmtToken, toTokenAtomic, groupDigits, shortenTokenId, tokenColor, UINT64_MAX } from '../../lib/tokenAmount'
 import { loadKnownTokenIds, rememberTokenIds, loadRegisteredTokens, appendRegisteredToken } from '../../lib/tokenStorage'
@@ -92,8 +93,15 @@ function topTokenLeg(legs: TokenLeg[] | undefined, infoById: Map<string, TokenRo
   return { outgoing: top.net < 0n, amount: fmtToken(top.magnitude, top.decimals), ticker: top.ticker, extra: moved.length - 1 }
 }
 
-export function Dashboard({ address, walletName, wallets, onLocked }:
-  { address: string; walletName: string; wallets: WalletMeta[]; onLocked: () => void }) {
+export function Dashboard({ address, walletName, wallets, network, onLocked }:
+  {
+    address: string; walletName: string
+    /** EVERY wallet, each carrying the networks it is on. Selection shows them
+     *  all so a wallet from another chain can be brought onto this one. */
+    wallets: WalletMeta[]
+    network: NetworkName
+    onLocked: () => void
+  }) {
   const [info, setInfo] = useState<any>(null)
   const [txs, setTxs] = useState<Tx[]>([])
   const [creds, setCreds] = useState<lws.Credentials | null>(null)
@@ -125,6 +133,8 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
   const [receiveToken, setReceiveToken] = useState<TokenRow | null>(null)
   const [homeTab, setHomeTab] = useState<'tokens' | 'activity'>('tokens')
   const [showWallets, setShowWallets] = useState(false)
+  // Wallet id awaiting a "use on this network" confirm, from wallet selection.
+  const [addWalletTo, setAddWalletTo] = useState<string | null>(null)
   // Asset picker for the send form — a native <select>'s open dropdown is
   // drawn by the OS/browser chrome layer, not the page, so it can't be
   // screenshotted or reliably inspected inside a side panel; a plain in-DOM
@@ -668,11 +678,16 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
   return (
     <div className="wrap">
       <div className="header">
+        {/* The active chain sits beside the wordmark as a plain label — always
+            visible, never a control. Switching lives in Settings > Network, so
+            it cannot be triggered by a stray tap in the header. Amber on
+            testnet; muted on mainnet, so the chain is stated either way rather
+            than left to be inferred from the absence of a badge. */}
         <div className="brand">
           <img src="icons/logo.svg" alt="" />Beldex
-          {/* Non-mainnet builds are visually unmistakable — mixing up a testnet
-              and mainnet wallet is an easy and expensive mistake to make. */}
-          {CONFIG.NETWORK !== 'mainnet' && <span className="net-badge">{CONFIG.NETWORK_LABEL}</span>}
+          <span className={CONFIG.IS_TESTNET ? 'net-badge' : 'net-label'}>
+            {CONFIG.NETWORK_LABEL}
+          </span>
         </div>
         <div className="header-actions">
           <button className="btn-icon btn-wallet-switch" title="Switch wallet" onClick={() => setShowWallets(true)}>
@@ -685,7 +700,8 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
       </div>
 
       {view === 'settings' && (
-        <Settings walletName={walletName} onBack={() => setView('home')} onWiped={onLocked} onChanged={onLocked}
+        <Settings walletName={walletName} network={network}
+          onBack={() => setView('home')} onWiped={onLocked} onChanged={onLocked}
           onLock={async () => { await sendToBackground({ type: 'LOCK' }); onLocked() }}
           onRegisterToken={() => { setSendAsset(''); setTokenToggle(true); setTxResult(''); setFormError(''); setAssetPickerOpen(false); setPickerFromHome(false); setView('send') }} />
       )}
@@ -957,6 +973,13 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
 
       {view === 'send' && !assetPickerOpen && (
         <div className="card">
+          {/* Spending is where getting the chain wrong costs real money, so the
+              network is restated here rather than left to the header badge. */}
+          {CONFIG.IS_TESTNET && (
+            <p className="warn" style={{ marginTop: 0 }}>
+              {CONFIG.NETWORK_LABEL} — these coins have no value.
+            </p>
+          )}
           {!tokenToggle ? (
             <>
               <div className="settings-header" style={{ paddingLeft: 0, paddingRight: 0, marginLeft: -16 }}>
@@ -1225,37 +1248,90 @@ export function Dashboard({ address, walletName, wallets, onLocked }:
         </div>
       )}
 
-      {showWallets && (
-        <div className="modal-overlay" onClick={() => setShowWallets(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <h2>Wallets</h2>
-            {wallets.map(w => (
-              <div className="menu-item" key={w.id} onClick={async () => {
-                setShowWallets(false)
-                if (!w.active) {
-                  // switching locks the session — the target wallet's password is required
-                  await sendToBackground({ type: 'SWITCH_WALLET', id: w.id })
-                  onLocked()
-                }
-              }}>
-                <span>
-                  {w.active ? <b className="ok">● </b> : ''}{w.name}
-                  {w.address && <span className="muted" style={{ marginLeft: 8, fontSize: 10 }}>
-                    {truncateMiddle(w.address, 6)}
-                  </span>}
-                </span>
-                {!w.active && <span className="chev">›</span>}
-              </div>
-            ))}
-            <div className="row" style={{ marginTop: 12 }}>
-              <button className="btn-ghost" onClick={() => setShowWallets(false)}>Close</button>
-              <button className="btn-primary" onClick={() => { setShowWallets(false); setView('addwallet') }}>
-                + Add wallet
-              </button>
+      {showWallets && (() => {
+        const pending = addWalletTo ? wallets.find(w => w.id === addWalletTo) : null
+        const close = () => { setShowWallets(false); setAddWalletTo(null) }
+        return (
+          <div className="modal-overlay" onClick={close}>
+            <div className="modal" onClick={e => e.stopPropagation()}>
+              {pending ? (
+                /* A dedicated step rather than a box wedged into the list: the
+                   list can be long, and expanding a row in place pushed the
+                   rest around under the user's finger. */
+                <>
+                  <h2>Use on {NETWORKS[network].label}</h2>
+                  <p className="muted" style={{ lineHeight: 1.55 }}>
+                    Use <b>{pending.name}</b> on {NETWORKS[network].label}? It is the same account
+                    and the same seed — it gets this chain's address.
+                  </p>
+                  <div className="row" style={{ marginTop: 14 }}>
+                    <button className="btn-ghost" onClick={() => setAddWalletTo(null)}>Cancel</button>
+                    <button className="btn-primary" onClick={async () => {
+                      const r = await sendToBackground({
+                        type: 'ADD_WALLET_TO_NETWORK', id: pending.id, network
+                      })
+                      setAddWalletTo(null)
+                      if (!r.ok) return
+                      setShowWallets(false)
+                      await sendToBackground({ type: 'SWITCH_WALLET', id: pending.id })
+                      onLocked()
+                    }}>Use here</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h2>Wallets</h2>
+                  {/* ALL wallets are listed, including those on the other chain.
+                      Hiding them would leave no route to bring one over; a tap
+                      offers exactly that, from where you already pick wallets. */}
+                  <div className="modal-list">
+                    {wallets.map(w => {
+                      const here = w.networks.includes(network)
+                      const alsoOn = w.networks.filter(n => n !== network)
+                      return (
+                        <div className="menu-item" key={w.id} onClick={async () => {
+                          if (w.active) { close(); return }
+                          if (!here) { setAddWalletTo(w.id); return }
+                          setShowWallets(false)
+                          // switching locks the session — the target wallet's password is required
+                          await sendToBackground({ type: 'SWITCH_WALLET', id: w.id })
+                          onLocked()
+                        }}>
+                          <span style={here ? undefined : { opacity: 0.6 }}>
+                            {w.active ? <b className="ok">● </b> : ''}{w.name}
+                            {!here && (
+                              <span className="muted" style={{ marginLeft: 6, fontSize: 9 }}>
+                                not on {NETWORKS[network].label}
+                              </span>
+                            )}
+                            {here && alsoOn.length > 0 && (
+                              <span className="muted" style={{ marginLeft: 6, fontSize: 9 }}>
+                                (also on {alsoOn.map(n => NETWORKS[n].label).join(', ')})
+                              </span>
+                            )}
+                            {here && w.address && (
+                              <span className="muted" style={{ marginLeft: 8, fontSize: 10 }}>
+                                {truncateMiddle(w.address, 6)}
+                              </span>
+                            )}
+                          </span>
+                          {!w.active && <span className="chev">›</span>}
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <div className="row" style={{ marginTop: 12, flex: 'none' }}>
+                    <button className="btn-ghost" onClick={close}>Close</button>
+                    <button className="btn-primary" onClick={() => { close(); setView('addwallet') }}>
+                      + Add wallet
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {selectedTx && (() => {
         const delta = parseAtomic(selectedTx.total_received) - parseAtomic(selectedTx.total_sent)

@@ -86,9 +86,64 @@ divergence for panel open/close is isolated in `src/lib/platform.ts`.
 
 ### Network selection and `.env`
 
-The chain is a **build-time** choice, not a runtime toggle: there is no in-app network switcher,
-and only the selected network's endpoints are present in the bundle, so a build can only ever
-reach the chain it was compiled for.
+The chain is a **runtime choice**, selected in **Settings → Network**. Every network's endpoints
+ship in every build. `BDX_NETWORK` / `--env network=…` now set which chain a *fresh* wallet starts
+on (and the testnet build branding) — not what the build can reach.
+
+The active network is **global**, and changing it is the *only* thing that changes it: picking a
+wallet never does. Each wallet records the networks it appears on, and only wallets on the active
+chain are **selectable** — which is what makes wallet selection incapable of moving you between
+chains. The active wallet is remembered per network, so switching chains restores whichever wallet
+you last used there.
+
+Wallet selection lists **every** wallet, including ones that live only on the other chain: those
+are shown greyed with "not on <network>", and tapping one offers to use it here in a single
+confirm. Hiding them would leave no route to bring a wallet across. It is the same keypair either
+way — only the address encoding differs.
+
+Switching chains is refused outright when the wallet you are currently using is not on the target
+chain. The confirm step asks whether to bring it across: accepting adds it and keeps you on it,
+declining cancels the switch and returns you to your wallet. The alternative — silently landing
+you on whatever wallet that chain happened to have — is how a network switch loses your place.
+
+> **This replaced an earlier invariant.** The chain used to be fixed at compile time so that a
+> build could only ever reach the chain it was compiled for. A user-facing switcher is
+> incompatible with that, so it is gone. What guards the user instead is that non-mainnet is
+> always *visibly* marked — an amber label beside the wordmark in the header and on the Unlock
+> screen, a warning on the send screen, and the chain named on every dapp approval — and that the
+> chain is stated at all times rather than inferred.
+
+#### How switching works
+
+A Beldex account is **one keypair on every chain**; the address is only that keypair encoded with
+a network-specific prefix, and seed → spend/view derivation never involves the nettype. So the
+same account always exists on both networks and a switch is a *re-encoding*, not a re-derivation:
+
+- the wallet **stays unlocked** when the same wallet is on both chains — nothing new is
+  decrypted and there is no re-unlock. It necessarily locks when the target chain's active wallet
+  is a *different* wallet, whose password the session does not hold;
+- the switch needs **no password** — it reveals nothing and spends nothing, only re-encoding an
+  address the session already holds. It is still confirmed, and that step states the
+  consequences: the receiving address changes, the new chain is only tracked from now on, and
+  whether you are moving to play money or real money;
+- the account is **registered with the target chain's LWS from the background** (`/login`,
+  `create_account: true`) on switch and at wallet setup, so it exists on that server
+  regardless of whether a panel is open — without it the first reads come back
+  "account not exists" rather than an empty balance;
+- the address is recomputed in pure JS from the session's **public** keys
+  (`addressForNettype` in `src/lib/signMessage.ts`), so it works in the background service
+  worker, which can neither load the WASM nor see the seed (the session strips it);
+- per-wallet history, tokens and pending txs namespace themselves for free, because they are
+  already keyed by address — and the address differs per chain;
+- chain-specific caches (`sync_cache`, `corrected_balance`) are dropped on switch;
+- a switch is **refused while a send holds the global lock** — a transaction under construction
+  has already picked outputs and a fee against one chain's unspent set;
+- pending dapp approvals are **voided** (they were reviewed against another chain's address and
+  balance), while **grants survive**: connected sites keep their connection and receive
+  `networkChanged` + `accountsChanged`.
+
+`test/address.test.mjs` pins the keypair/address claims against the WASM core itself, and
+`test/network-switch.test.mjs` drives the whole state machine through the built background.
 
 ```bash
 cp .env.example .env       # .env is gitignored; the template is committed
@@ -101,29 +156,36 @@ Config resolves in this order, each layer overriding the one before:
    `process.env` beats `.env`, so CI can override without writing a file.
 3. `--env network=…` on the webpack CLI — what the `:testnet` npm scripts pass.
 
-`webpack.config.js` merges those, hands the result to `DefinePlugin` as `__BDX_NET__` (read by
-`src/lib/config.ts`), and **derives** the manifest's `host_permissions` from the resolved URLs.
-So pointing `TESTNET_LWS_URL` at a local server in `.env` automatically grants permission to
-reach it — endpoints and permissions can't drift apart, which is the usual cause of "the fetch
-fails and nothing says why". Ports are stripped from the derived patterns, since Chrome rejects
-a manifest whose host permissions contain one.
+`webpack.config.js` resolves **every** network, hands them to `DefinePlugin` as `__BDX_NETS__`
+(plus `__BDX_DEFAULT_NET__`, read by `src/lib/config.ts`), and **derives** the manifest's
+`host_permissions` from the union of all of their URLs. So pointing `TESTNET_LWS_URL` at a local
+server in `.env` automatically grants permission to reach it, and switching chains can never land
+on a host the manifest didn't grant — endpoints and permissions can't drift apart, which is the
+usual cause of "the fetch fails and nothing says why". Ports are stripped from the derived
+patterns, since Chrome rejects a manifest whose host permissions contain one.
 
 Testnet builds additionally get a distinct extension name (`Beldex Wallet (Testnet)`) and Firefox
-add-on id — so testnet and mainnet can be installed side by side with separate storage — plus an
-amber **TESTNET** badge in the panel header.
+add-on id — so a testnet-default and mainnet-default build can be installed side by side with
+separate storage.
 
 | | mainnet | testnet |
 |---|---|---|
 | `NETTYPE` | 0 | 1 |
+| Address prefix | 209 | 53 |
 | LWS | `lwsapi.beldex.io` | `lwsapi.beldex.dev` |
 | Explorer / BNS | `explorer.beldex.io` | `testnet.beldex.dev` |
 | Daemon JSON-RPC | `explorer.beldex.io` | `209.126.86.93:29091` |
 
-> **Two caveats on the testnet defaults.** The daemon RPC is plaintext `http://` — extension
-> pages are secure contexts, so the browser will block that fetch as mixed content (the build
-> prints a warning). It's unused today, but it needs to be `https` before anything calls it.
-> And `SHOW_FIAT` is on for testnet, which quotes the *mainnet* BDX price next to coins that have
-> no value; set `TESTNET_SHOW_FIAT=false` in `.env` if that's misleading in your context.
+> **One caveat on the testnet defaults.** The daemon RPC is plaintext `http://` — extension pages
+> are secure contexts, so the browser will block that fetch as mixed content (the build prints a
+> warning). It is unused today, but it needs to be `https` before anything calls it. Note that
+> because every build now ships every network, that warning fires on mainnet builds too, and
+> `http://209.126.86.93/*` appears in their `host_permissions`. Set `TESTNET_DAEMON_RPC_URL` to an
+> `https` endpoint in `.env` to clear both.
+>
+> `SHOW_FIAT` is now **off** for testnet by default: it quotes the *mainnet* BDX price, which was
+> merely odd when testnet was a separate build and is actively misleading when a user can switch
+> chains in-app. Set `TESTNET_SHOW_FIAT=true` to restore it.
 
 ## Features
 
@@ -131,6 +193,8 @@ amber **TESTNET** badge in the panel header.
 |---|---|
 | Create / restore wallet (25-word seed), seed-confirmation quiz | done |
 | Multi-wallet, per-wallet vault + password, auto-migration | done |
+| Runtime mainnet/testnet switching (Settings → Network), same account on both chains | done |
+| Per-network wallet selection; bring a wallet onto the current chain in one confirm | done |
 | Encrypted vault, unlock/lock, auto-lock alarm, brute-force backoff | done |
 | Dashboard: balance (total/unlocked/locked), hide-balance, BDX→USDT price, sync height | done |
 | Send, incl. BNS name resolution, review modal, live progress, flash priority (5) | done |

@@ -115,10 +115,23 @@
       .brand img { width: clamp(18px, 5vw, 26px); height: clamp(18px, 5vw, 26px); display: block; }
       .brand.lg { flex-direction: column; gap: 12px; font-size: 18px; }
       .brand.lg img { width: 56px; height: 56px; }
-      /* Shown only on non-mainnet builds (see Dashboard header). */
+      /* The network switcher. Neutral on mainnet; the amber .net-badge
+         treatment is added on every other chain (see Dashboard header). */
+      .net-switch {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        max-width: 92px;
+      }
+      /* Amber = not mainnet, wherever it appears (header switcher, wallet list). */
       .net-badge {
         font-family: var(--display); font-size: 7px; letter-spacing: 0.5px;
         padding: 2px 5px; border: 1px solid #E8A33D; color: #E8A33D;
+        border-radius: 3px; line-height: 1;
+      }
+      .btn-icon.net-badge { font-size: 9px; padding: 3px 7px; }
+      /* Mainnet counterpart of .net-badge: states the chain without shouting. */
+      .net-label {
+        font-family: var(--display); font-size: 7px; letter-spacing: 0.5px;
+        padding: 2px 5px; border: 1px solid var(--border); color: var(--text-dim);
         border-radius: 3px; line-height: 1;
       }
 
@@ -342,7 +355,15 @@
       .modal {
         background: var(--panel); border: 1px solid var(--border);
         padding: 20px; width: 100%; max-width: 340px;
+        /* A list of wallets can outgrow the viewport. Without a ceiling the
+           modal overflowed the overlay and rows rendered over one another, so
+           it scrolls internally instead. */
+        max-height: calc(100vh - 48px);
+        overflow-y: auto;
+        display: flex; flex-direction: column;
       }
+      /* The rows scroll; the action row beneath them stays put. */
+      .modal-list { overflow-y: auto; flex: 1 1 auto; min-height: 0; margin: 0 -4px; padding: 0 4px; }
 
       .home-tabs {
         display: flex; gap: 18px;
