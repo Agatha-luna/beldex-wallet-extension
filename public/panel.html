@@ -103,6 +103,14 @@
         text-transform: uppercase;
         flex: 0 1 auto; min-width: 0;
       }
+      /* Header left cluster: logo + active-wallet switcher + chain label. Not
+         uppercased like .brand — the wallet name is shown as the user typed it. */
+      .header-wallet {
+        display: flex; align-items: center; gap: 7px;
+        flex: 1 1 auto; min-width: 0;
+      }
+      .header-wallet img { width: clamp(18px, 5vw, 24px); height: clamp(18px, 5vw, 24px); display: block; flex: none; }
+      .header-wallet .btn-wallet-switch { max-width: 150px; font-size: 13px; font-weight: 600; }
       .header-actions {
         display: flex; align-items: center; gap: 4px;
         flex: 0 1 auto; min-width: 0;

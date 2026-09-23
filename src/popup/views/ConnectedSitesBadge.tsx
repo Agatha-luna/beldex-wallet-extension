@@ -104,7 +104,9 @@ export function SiteConnectionBar({ walletName }: { walletName: string }) {
   }
 
   return (
-    <div style={{ marginTop: 12 }}>
+    // Pinned to the FAR bottom of the panel, set off from the content above by
+    // a full-width divider so the connection status reads as its own footer.
+    <div style={{ marginTop: 'auto', paddingTop: 14, borderTop: '1px solid var(--border)' }}>
       {open && (
         <div className="card" style={{ marginBottom: 0, borderBottom: 'none', padding: '6px 12px' }}>
           <p className="muted" style={{ margin: '4px 0 2px', fontSize: 10, textTransform: 'uppercase', letterSpacing: 1 }}>

@@ -678,21 +678,21 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
   return (
     <div className="wrap">
       <div className="header">
-        {/* The active chain sits beside the wordmark as a plain label — always
-            visible, never a control. Switching lives in Settings > Network, so
-            it cannot be triggered by a stray tap in the header. Amber on
-            testnet; muted on mainnet, so the chain is stated either way rather
-            than left to be inferred from the absence of a badge. */}
-        <div className="brand">
-          <img src="icons/logo.svg" alt="" />Beldex
+        {/* The active wallet sits where the wordmark used to (the browser's own
+            side-panel title already reads "Beldex Wallet", so an in-app wordmark
+            just duplicated it). Tap the name to switch wallets; the current
+            chain is stated beside it as a plain label — amber on testnet, muted
+            on mainnet — never a control. Network switching lives in Settings. */}
+        <div className="header-wallet">
+          <img src="icons/logo.svg" alt="" />
+          <button className="btn-icon btn-wallet-switch" title="Switch wallet" onClick={() => setShowWallets(true)}>
+            {walletName || 'Wallet'} ▾
+          </button>
           <span className={CONFIG.IS_TESTNET ? 'net-badge' : 'net-label'}>
             {CONFIG.NETWORK_LABEL}
           </span>
         </div>
         <div className="header-actions">
-          <button className="btn-icon btn-wallet-switch" title="Switch wallet" onClick={() => setShowWallets(true)}>
-            {walletName || 'Wallet'} ▾
-          </button>
           <button className="btn-icon" title="Menu" onClick={() => setView(view === 'settings' ? 'home' : 'settings')}>
             ☰
           </button>
