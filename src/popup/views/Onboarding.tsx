@@ -233,7 +233,8 @@ export function Onboarding({ onDone, addMode = false, onCancel }:
           shows up here once that transaction confirms.
         </p>
       </div>
-      <textarea rows={4} placeholder="Enter your 25-word seed"
+      <textarea rows={4} placeholder="Enter your 25-word recovery seed, words separated by spaces"
+        style={{ minHeight: 96, lineHeight: 1.6, resize: 'vertical' }}
         value={mnemonic} onChange={e => setMnemonic(e.target.value)} />
       <input placeholder="Wallet name (e.g. Savings)" value={name}
         onChange={e => setName(e.target.value)} />
