@@ -684,7 +684,6 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
             chain is stated beside it as a plain label — amber on testnet, muted
             on mainnet — never a control. Network switching lives in Settings. */}
         <div className="header-wallet">
-          <img src="icons/logo.svg" alt="" />
           <button className="btn-icon btn-wallet-switch" title="Switch wallet" onClick={() => setShowWallets(true)}>
             {walletName || 'Wallet'} ▾
           </button>
