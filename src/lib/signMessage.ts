@@ -258,3 +258,73 @@ export function addressSpendKey(address: string): string | null {
   const spend = raw.subarray(i, i + 32)
   return spend.length === 32 ? bytesToHex(spend) : null
 }
+
+// ------------------------------------------------- addresses across networks
+// The inverse of addressSpendKey: build an address for an arbitrary nettype.
+//
+// A Beldex account IS a keypair; the address is only that keypair wearing a
+// network-specific prefix. Seed -> spend/view derivation does not involve the
+// nettype at all, so the same account exists on every chain and switching
+// networks is a re-ENCODING of keys the wallet already holds — never a
+// re-derivation. That is what lets the network switch happen without the seed,
+// without the password, and without a re-unlock. (test/address.test.mjs pins
+// all of this against the WASM core.)
+//
+// This lives here, next to the decoder, for the same reason the decoder does:
+// it must work where the Emscripten glue cannot load. The background owns the
+// session and therefore performs the switch, and it is a service worker — the
+// WASM's address_and_keys_from_seed is doubly unavailable to it, needing both
+// the glue and the SEED that the session deliberately strips.
+//
+//   address = base58( varint(prefix) ‖ pubSpend[32] ‖ pubView[32] ‖ keccak256(…)[0..4] )
+
+/**
+ * CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX per nettype, as the core defines it
+ * (0 = mainnet, 1 = testnet, 2 = devnet). Consensus constants, so they live in
+ * code rather than in networks.json with the endpoints — an operator may
+ * repoint an LWS URL, never an address prefix.
+ */
+export const ADDRESS_PREFIX: Readonly<Record<number, number>> = { 0: 209, 1: 53, 2: 24 }
+
+/** LEB128, as used for the address prefix. */
+function varint(n: number): Uint8Array {
+  const out: number[] = []
+  let v = n
+  do {
+    let byte = v & 0x7f
+    v >>>= 7
+    if (v > 0) byte |= 0x80
+    out.push(byte)
+  } while (v > 0)
+  return new Uint8Array(out)
+}
+
+/**
+ * Encode a standard (non-integrated, non-subaddress) address for `nettype`
+ * from the account's PUBLIC keys.
+ *
+ * Throws on malformed keys or an unknown nettype rather than returning a
+ * plausible-looking wrong address — a wrong address here is silently
+ * unspendable funds, so this must fail loudly.
+ */
+export function addressForNettype(pubSpendKey: string, pubViewKey: string, nettype: number): string {
+  const prefix = ADDRESS_PREFIX[nettype]
+  if (prefix === undefined) throw new Error(`unknown nettype ${nettype}`)
+
+  const spend = hexToBytes(pubSpendKey)
+  const view = hexToBytes(pubViewKey)
+  if (spend.length !== 32) throw new Error('bad spend public key')
+  if (view.length !== 32) throw new Error('bad view public key')
+
+  const p = varint(prefix)
+  const body = new Uint8Array(p.length + 64)
+  body.set(p, 0)
+  body.set(spend, p.length)
+  body.set(view, p.length + 32)
+
+  const full = new Uint8Array(body.length + 4)
+  full.set(body, 0)
+  full.set(keccak_256(body).subarray(0, 4), body.length)
+
+  return base58Encode(full)
+}

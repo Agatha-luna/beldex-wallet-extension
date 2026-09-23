@@ -66,34 +66,53 @@ module.exports = (env = {}) => {
   const network = requested === 'testnet' ? 'testnet' : 'mainnet'
   const testnet = network === 'testnet'
 
-  const P = network.toUpperCase() // MAINNET_ / TESTNET_ override prefix
-  const base = networks[network]
   const bool = (v, fallback) => (v === undefined ? fallback : v !== 'false' && v !== '0')
 
-  const net = {
-    network,
-    nettype: base.nettype,
-    label: base.label,
-    lws: cfg(`${P}_LWS_URL`) ?? base.lws,
-    daemonRpc: cfg(`${P}_DAEMON_RPC_URL`) ?? base.daemonRpc,
-    bnsLookup: cfg(`${P}_BNS_LOOKUP_URL`) ?? base.bnsLookup,
-    explorerTx: cfg(`${P}_EXPLORER_TX_URL`) ?? base.explorerTx,
-    priceUrl: cfg(`${P}_PRICE_URL`) ?? base.priceUrl,
-    showFiat: bool(cfg(`${P}_SHOW_FIAT`), base.showFiat),
-    autoLockMinutes: Number(cfg('BDX_AUTO_LOCK_MINUTES') ?? 15)
+  const autoLockMinutes = Number(cfg('BDX_AUTO_LOCK_MINUTES') ?? 15)
+  if (!Number.isFinite(autoLockMinutes) || autoLockMinutes < 1 || autoLockMinutes > 240) {
+    throw new Error(`BDX_AUTO_LOCK_MINUTES must be a number between 1 and 240 (got "${autoLockMinutes}")`)
   }
 
-  if (!Number.isFinite(net.autoLockMinutes) || net.autoLockMinutes < 1 || net.autoLockMinutes > 240) {
-    throw new Error(`BDX_AUTO_LOCK_MINUTES must be a number between 1 and 240 (got "${net.autoLockMinutes}")`)
+  // Every network is resolved and shipped, because the chain is now a RUNTIME
+  // choice (per-wallet network switcher). `network` above only decides which
+  // one a fresh wallet starts on, and the build's testnet branding.
+  const resolveNetwork = (name) => {
+    const P = name.toUpperCase() // MAINNET_ / TESTNET_ override prefix
+    const base = networks[name]
+    return {
+      network: name,
+      nettype: base.nettype,
+      label: base.label,
+      lws: cfg(`${P}_LWS_URL`) ?? base.lws,
+      daemonRpc: cfg(`${P}_DAEMON_RPC_URL`) ?? base.daemonRpc,
+      bnsLookup: cfg(`${P}_BNS_LOOKUP_URL`) ?? base.bnsLookup,
+      explorerTx: cfg(`${P}_EXPLORER_TX_URL`) ?? base.explorerTx,
+      priceUrl: cfg(`${P}_PRICE_URL`) ?? base.priceUrl,
+      showFiat: bool(cfg(`${P}_SHOW_FIAT`), base.showFiat),
+      autoLockMinutes
+    }
   }
 
-  // host_permissions are DERIVED from the URLs actually in use, so overriding an
-  // endpoint in .env can never leave the extension unable to fetch it. The price
-  // host is included only when fiat is on.
-  const urls = [net.lws, net.daemonRpc, net.bnsLookup, net.explorerTx]
-  if (net.showFiat) urls.push(net.priceUrl)
-  for (const u of urls) {
-    try { new URL(u) } catch { throw new Error(`Invalid URL in network config (${network}): "${u}"`) }
+  const nets = {}
+  for (const name of Object.keys(networks)) {
+    if (name.startsWith('_')) continue // networks.json carries a _comment block
+    nets[name] = resolveNetwork(name)
+  }
+  const net = nets[network]
+
+  // host_permissions are DERIVED from the URLs actually in use — across EVERY
+  // network, since any of them can be selected at runtime. Overriding an
+  // endpoint in .env can never leave the extension unable to fetch it, and
+  // switching chains can never land on a host the manifest didn't grant. The
+  // price host is included only for networks with fiat on.
+  const urls = []
+  for (const [name, n] of Object.entries(nets)) {
+    const own = [n.lws, n.daemonRpc, n.bnsLookup, n.explorerTx]
+    if (n.showFiat) own.push(n.priceUrl)
+    for (const u of own) {
+      try { new URL(u) } catch { throw new Error(`Invalid URL in network config (${name}): "${u}"`) }
+    }
+    urls.push(...own)
   }
   const extra = (cfg('BDX_EXTRA_HOSTS') ?? '').split(',').map(s => s.trim()).filter(Boolean)
   const hosts = [...new Set([...urls.map(hostPattern), ...extra])]
@@ -165,11 +184,14 @@ module.exports = (env = {}) => {
       Buffer: ['buffer', 'Buffer'],
       process: 'process/browser'
     }),
-    // The fully resolved network config, substituted as an object literal and
-    // read by src/lib/config.ts as __BDX_NET__. Only the selected network's
-    // endpoints reach the bundle — the other one's URLs aren't in the output.
+    // EVERY network's resolved config, substituted as an object literal and
+    // read by src/lib/config.ts as __BDX_NETS__, plus which one a fresh wallet
+    // starts on. All networks' endpoints are in the bundle by design — the
+    // chain is a runtime, per-wallet choice now, and the manifest grants the
+    // union of their hosts (see the host_permissions derivation above).
     new webpack.DefinePlugin({
-      __BDX_NET__: JSON.stringify(net)
+      __BDX_NETS__: JSON.stringify(nets),
+      __BDX_DEFAULT_NET__: JSON.stringify(network)
     }),
     new CopyPlugin({
       patterns: [

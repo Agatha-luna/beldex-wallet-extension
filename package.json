@@ -3,6 +3,9 @@
   "version": "1.2.0",
   "private": true,
   "description": "Beldex wallet browser extension (Manifest V3) built on the Beldex LWS wasm core",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "npm run build:chrome && npm run build:firefox",
     "build:chrome": "webpack --mode=production",

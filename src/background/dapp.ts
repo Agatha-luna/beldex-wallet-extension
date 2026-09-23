@@ -15,7 +15,8 @@
 // (-32603) and the page can simply call connect() again — if the user approved
 // meanwhile, the persisted grant resolves it instantly with no UI.
 
-import { CONFIG } from '../lib/config'
+import { CONFIG, DEFAULT_NETWORK, activeNetwork, isNetworkName, setActiveNetwork } from '../lib/config'
+import type { NetworkName } from '../lib/config'
 import * as lws from '../lib/lws'
 import { resolveBnsWallet, looksLikeBnsName } from '../lib/bns'
 import { sessionStore } from '../lib/sessionStore'
@@ -30,6 +31,7 @@ import type { WalletSecrets } from '../lib/messages'
 // Storage keys shared with background/index.ts — keep in sync.
 const WALLETS_KEY = 'wallets'
 const ACTIVE_KEY = 'active_wallet_id'
+const ACTIVE_NET_KEY = 'active_network'   // global; written by background/index.ts
 const SESSION_KEY = 'session_secrets'
 const CACHE_KEY = 'sync_cache'
 
@@ -128,6 +130,10 @@ interface PendingMeta {
    *  queued while locked, reviewed after the unlock the approval surface
    *  itself performs); the walletId binding still applies. */
   sessionGeneration: string | null
+  /** Chain this request was drawn against. Part of the same immutable context:
+   *  the address, balance and fee under review are meaningless on another
+   *  network, so switching voids the request (dappInvalidateForNetwork). */
+  network: NetworkName
 }
 
 interface PendingLive extends PendingMeta {
@@ -162,7 +168,30 @@ const readStamps = new Map<string, number[]>()       // origin -> request times
 
 // ---- small wallet-store readers (same keys as background/index.ts) ---------
 
-interface StoredWallet { name: string; address: string }
+// Mirrors background/index.ts's StoredWallet (the authoritative writer).
+interface StoredWallet {
+  name: string
+  address: string
+  addresses?: Partial<Record<NetworkName, string>>
+  /** Networks this wallet appears on. `network` is the superseded single-value
+   *  form, still read so a wallet written by an older version resolves. */
+  networks?: NetworkName[]
+  network?: NetworkName
+}
+
+function walletNetworks(w: StoredWallet | undefined): NetworkName[] {
+  if (!w) return []
+  const list = (w.networks ?? []).filter(isNetworkName)
+  if (list.length) return list
+  return [isNetworkName(w.network) ? w.network : DEFAULT_NETWORK]
+}
+
+/** This wallet's address on `network` — never the raw stored `address`, which
+ *  belongs to whichever chain the wallet was created on. */
+function walletAddress(w: StoredWallet | undefined, network: NetworkName): string {
+  if (!w) return ''
+  return w.addresses?.[network] ?? (walletNetworks(w)[0] === network ? w.address : '')
+}
 
 async function getWallets(): Promise<Record<string, StoredWallet>> {
   return (await chrome.storage.local.get(WALLETS_KEY))[WALLETS_KEY] ?? {}
@@ -212,8 +241,24 @@ async function updateGrants(mutate: (g: GrantMap) => boolean): Promise<void> {
   })
 }
 
-function nettype(): 'mainnet' | 'testnet' {
+function nettype(): NetworkName {
   return CONFIG.NETWORK
+}
+
+/** Point CONFIG at the active wallet's chain before serving a dapp request.
+ *  Port traffic does not pass through background/index.ts's handle(), and the
+ *  MV3 worker may have restarted since the selection was made, so this runs at
+ *  the top of every port dispatch — otherwise a woken worker could answer
+ *  bdx_getNetwork, or fetch a balance, for the wrong chain. */
+async function hydrateNetwork(): Promise<NetworkName> {
+  // The active network is a GLOBAL setting written by background/index.ts — not
+  // a property of the active wallet. Reading it from the wallet (as this used
+  // to) left the dapp bridge answering for the wrong chain after a switch.
+  const stored = (await chrome.storage.local.get(ACTIVE_NET_KEY))[ACTIVE_NET_KEY]
+  if (isNetworkName(stored)) return setActiveNetwork(stored)
+  // Not yet migrated: fall back to the active wallet's own chain.
+  const [wallets, activeId] = await Promise.all([getWallets(), getActiveId()])
+  return setActiveNetwork(walletNetworks(activeId ? wallets[activeId] : undefined)[0] ?? DEFAULT_NETWORK)
 }
 
 function err(code: number, message: string): { code: number; message: string } {
@@ -359,6 +404,27 @@ export async function dappInvalidateOnSessionEnd(): Promise<void> {
  *  grant) with a different wallet's keys. */
 export async function dappInvalidateForWallet(activeId: string): Promise<void> {
   await rejectPendingWhere(m => m.walletId !== activeId, 'wallet changed — request cancelled')
+}
+
+/** The active network changed: every approval queued on another chain is void.
+ *  The address, balance and fee a user reviewed are all chain-specific, so an
+ *  approval drawn on one network must never execute on another — including a
+ *  connect approval, whose card displays an address that is only valid for the
+ *  chain it was rendered on. */
+export async function dappInvalidateForNetwork(network: NetworkName): Promise<void> {
+  await rejectPendingWhere(m => m.network !== network, 'network changed — request cancelled')
+}
+
+/**
+ * The active wallet moved to another chain. Grants deliberately SURVIVE: the
+ * account is the same keypair on every network and the user did not revoke
+ * anything, so the connection stands and the site is simply told what changed.
+ * Both events fire because both facts changed — the chain, and the address
+ * that names this account on it.
+ */
+export async function dappNotifyNetworkChanged(walletId: string, address: string): Promise<void> {
+  await broadcast('networkChanged', { network: nettype() }, walletId)
+  await broadcast('accountsChanged', { address }, walletId)
 }
 
 // ---- balance ---------------------------------------------------------------
@@ -811,30 +877,45 @@ async function panelIsOpen(): Promise<boolean> {
   return false
 }
 
+/** Methods that can end up needing an approval UI. */
+const APPROVAL_METHODS = new Set<DappMethod>(['bdx_connect', 'bdx_sendTransaction', 'bdx_signMessage', 'bdx_signAuthChallenge'])
+
+/**
+ * Start opening the side panel — call this SYNCHRONOUSLY, with no `await`
+ * anywhere between the triggering port message and this call, or Chrome
+ * silently drops the request ("may only be called in response to a user
+ * gesture"). We don't yet know whether the request will actually need an
+ * approval UI (e.g. bdx_connect might be pre-granted) — by the time the
+ * async grant/lock checks in handleMethod finish, the gesture window is
+ * long gone, so we speculatively fire this immediately for every
+ * APPROVAL_METHODS call and only look at the result once we know an
+ * approval UI is actually needed. Worst case for a pre-granted reconnect:
+ * the panel opens showing the wallet with nothing pending — harmless.
+ */
+function trySidePanelOpen(tabId: number): Promise<boolean> {
+  if (anyChrome.sidePanel?.open) {
+    return anyChrome.sidePanel.open({ tabId }).then(() => true).catch(() => false)
+  }
+  if (anyChrome.sidebarAction?.open) { // Firefox
+    return anyChrome.sidebarAction.open().then(() => true).catch(() => false)
+  }
+  return Promise.resolve(false)
+}
+
 /**
  * Surface an approval request to the user. Preferred: inside the wallet's
- * side panel (panel shows the request via DAPP_LIST_PENDING). Fallbacks, in
- * order: open the side panel programmatically (works when the browser still
- * honors the user's click gesture), else a standalone popup window.
+ * side panel (panel shows the request via DAPP_LIST_PENDING) — `panelOpenAttempt`
+ * is the (already in-flight) result of trySidePanelOpen, started synchronously
+ * back when the port message first arrived; we just await it here. If that
+ * didn't get the panel open (no permission, unsupported browser, or the
+ * gesture didn't carry through), fall back to a standalone popup window so
+ * the request still has *some* surface instead of failing outright.
+ *
+ * @returns true if the request is now visible somewhere the user will see it.
  */
-async function openApproval(reqId: string, tabId?: number): Promise<void> {
-  if (await panelIsOpen()) { notifyPanels(); return }
-
-  try {
-    // Chrome: needs the "sidePanel" permission and (usually) a user gesture.
-    if (anyChrome.sidePanel?.open && tabId !== undefined) {
-      await anyChrome.sidePanel.open({ tabId })
-      notifyPanels()
-      return
-    }
-  } catch { /* gesture not honored — fall back */ }
-  try {
-    if (anyChrome.sidebarAction?.open) { // Firefox
-      await anyChrome.sidebarAction.open()
-      notifyPanels()
-      return
-    }
-  } catch { /* fall back */ }
+async function openApproval(reqId: string, panelOpenAttempt: Promise<boolean> | null): Promise<boolean> {
+  if (await panelIsOpen()) { notifyPanels(); return true }
+  if (panelOpenAttempt && await panelOpenAttempt) { notifyPanels(); return true }
 
   // Anchor the popup to the TOP-RIGHT of the user's browser window (like
   // MetaMask) — computed from the focused window's geometry, no extra
@@ -852,14 +933,19 @@ async function openApproval(reqId: string, tabId?: number): Promise<void> {
     }
   } catch { /* default placement */ }
 
-  const win = await chrome.windows.create({
-    url: chrome.runtime.getURL(`approval.html?reqId=${encodeURIComponent(reqId)}`),
-    type: 'popup', width: WIDTH, height: HEIGHT, focused: true, ...position
-  })
-  const live = pendingLive.get(reqId)
-  if (live && win.id !== undefined) {
-    live.windowId = win.id
-    windowToReq.set(win.id, reqId)
+  try {
+    const win = await chrome.windows.create({
+      url: chrome.runtime.getURL(`approval.html?reqId=${encodeURIComponent(reqId)}`),
+      type: 'popup', width: WIDTH, height: HEIGHT, focused: true, ...position
+    })
+    const live = pendingLive.get(reqId)
+    if (live && win.id !== undefined) {
+      live.windowId = win.id
+      windowToReq.set(win.id, reqId)
+    }
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -869,12 +955,17 @@ async function handleMethod(
   origin: string,
   req: DappPortRequest,
   respond: (msg: DappPortMessage) => void,
-  tabId?: number,
   senderUrl?: string,
-  port?: chrome.runtime.Port
+  port?: chrome.runtime.Port,
+  panelOpenAttempt: Promise<boolean> | null = null
 ): Promise<void> {
   const reply = (result: unknown) => respond({ id: req.id, result })
   const fail = (e: { code: number; message: string }) => respond({ id: req.id, error: e })
+
+  // Every answer below is chain-specific (address, balance, fee, nettype), and
+  // this worker may have woken with no in-memory selection — bind to the
+  // active wallet's network before dispatching.
+  await hydrateNetwork()
 
   switch (req.method) {
     case 'bdx_getState': {
@@ -962,7 +1053,7 @@ async function handleMethod(
       // Idempotent once granted (spec §4.1) — even while locked this reveals
       // nothing new to an origin the user already approved for this wallet.
       if (await grantedActiveId(origin)) {
-        return reply({ address: wallets[activeId].address, network: nettype() })
+        return reply({ address: walletAddress(wallets[activeId], nettype()), network: nettype() })
       }
       // One pending approval per origin (spec §7.4), admitted atomically.
       // Generation is null: connect may legitimately be approved after the
@@ -970,7 +1061,7 @@ async function handleMethod(
       {
         const a = await admitApproval({
           origin, method: req.method, params: undefined, pageReqId: req.id,
-          respond, tabId, walletId: activeId, sessionGeneration: null
+          respond, panelOpenAttempt, walletId: activeId, sessionGeneration: null
         })
         if (!a.ok) return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
@@ -1005,7 +1096,7 @@ async function handleMethod(
         // queue-write run under one mutex so two sends can't both be admitted.
         const a = await admitApproval({
           origin, method: req.method, params: v.send as unknown as object, pageReqId: req.id,
-          respond, tabId, walletId: activeId, sessionGeneration: generation, owner: port,
+          respond, panelOpenAttempt, walletId: activeId, sessionGeneration: generation, owner: port,
           requireNoSend: true
         })
         if (!a.ok) {
@@ -1043,7 +1134,7 @@ async function handleMethod(
       {
         const a = await admitApproval({
           origin, method: req.method, params: { message: v.message }, pageReqId: req.id,
-          respond, tabId, walletId: activeId, sessionGeneration: session.generation, owner: port
+          respond, panelOpenAttempt, walletId: activeId, sessionGeneration: session.generation, owner: port
         })
         if (!a.ok) return fail(err(ERR.INTERNAL, 'approval already pending'))
       }
@@ -1065,7 +1156,7 @@ async function handleMethod(
       {
         const a = await admitApproval({
           origin, method: req.method, params: { message: composed.message, fields: composed.fields },
-          pageReqId: req.id, respond, tabId, walletId: activeId,
+          pageReqId: req.id, respond, panelOpenAttempt, walletId: activeId,
           sessionGeneration: session.generation, owner: port
         })
         if (!a.ok) return fail(err(ERR.INTERNAL, 'approval already pending'))
@@ -1102,14 +1193,15 @@ async function queueApproval(
   params: object | undefined,
   pageReqId: string,
   respond: (msg: DappPortMessage) => void,
-  tabId: number | undefined,
   walletId: string,
   sessionGeneration: string | null,
-  owner?: chrome.runtime.Port
+  owner?: chrome.runtime.Port,
+  panelOpenAttempt: Promise<boolean> | null = null
 ): Promise<void> {
   const reqId = crypto.randomUUID()
   const meta: PendingMeta = {
     origin, method, createdAt: Date.now(), walletId, sessionGeneration,
+    network: activeNetwork(), // hydrated by the port handler before dispatch
     ...(params !== undefined ? { params } : {})
   }
   const timer = setTimeout(async () => {
@@ -1124,7 +1216,14 @@ async function queueApproval(
   }, APPROVAL_TTL_MS)
   pendingLive.set(reqId, { ...meta, pageReqId, respond, timer, ...(owner ? { owner } : {}) })
   await persistPending(reqId, meta)
-  await openApproval(reqId, tabId)
+
+  const shown = await openApproval(reqId, panelOpenAttempt)
+  if (!shown) {
+    settlePending(reqId, {
+      error: err(ERR.PANEL_CLOSED, 'Open the Beldex Wallet extension (click its icon in your browser toolbar), then try again.')
+    })
+    await removePending(reqId)
+  }
 }
 
 /** Serialized "check duplicate-pending conflicts, then queue" (external audit):
@@ -1133,7 +1232,7 @@ async function queueApproval(
  *  and queuing duplicate approvals. Returns which conflict blocked admission. */
 async function admitApproval(args: {
   origin: string; method: DappMethod; params: object | undefined; pageReqId: string
-  respond: (msg: DappPortMessage) => void; tabId?: number
+  respond: (msg: DappPortMessage) => void; panelOpenAttempt?: Promise<boolean> | null
   walletId: string; sessionGeneration: string | null; owner?: chrome.runtime.Port
   requireNoSend?: boolean
 }): Promise<{ ok: true } | { ok: false; kind: 'send' | 'origin' }> {
@@ -1143,7 +1242,7 @@ async function admitApproval(args: {
     if (c.origin) return { ok: false as const, kind: 'origin' as const }
     await queueApproval(
       args.origin, args.method, args.params, args.pageReqId, args.respond,
-      args.tabId, args.walletId, args.sessionGeneration, args.owner
+      args.walletId, args.sessionGeneration, args.owner, args.panelOpenAttempt ?? null
     )
     return { ok: true as const }
   })
@@ -1174,14 +1273,18 @@ export async function dappFirstPending(): Promise<
 async function pendingView(meta: PendingMeta): Promise<{
   origin: string; method: string; params?: object
   walletId: string; sessionGeneration: string | null
-  walletName: string; walletAddress: string
+  walletName: string; walletAddress: string; network: NetworkName
 }> {
   const w = (await getWallets())[meta.walletId]
+  // The address shown is the one for the network RECORDED on the request, for
+  // the same reason the wallet identity is: the card must describe the context
+  // the request was made in, not whatever is selected at render time.
   return {
     origin: meta.origin, method: meta.method,
     ...(meta.params !== undefined ? { params: meta.params } : {}),
     walletId: meta.walletId, sessionGeneration: meta.sessionGeneration,
-    walletName: w?.name ?? '', walletAddress: w?.address ?? ''
+    walletName: w?.name ?? '', walletAddress: walletAddress(w, meta.network),
+    network: meta.network
   }
 }
 
@@ -1450,14 +1553,21 @@ export function initDappBridge(): void {
       // deeply-nested params before any handler or crypto work.
       const req = validatePortMessage(raw)
       if (!req) return
+
+      // Must happen in this same synchronous tick — see trySidePanelOpen's
+      // doc comment. Any `await` before this line and Chrome drops the gesture.
+      const panelOpenAttempt = APPROVAL_METHODS.has(req.method) && tabId !== undefined
+        ? trySidePanelOpen(tabId)
+        : null
+
       const respond = (msg: DappPortMessage) => { try { port.postMessage(msg) } catch { /* gone */ } }
-      handleMethod(origin, req, respond, port.sender?.tab?.id, port.sender?.url, port).catch(() =>
+      handleMethod(origin, req, respond, port.sender?.url, port, panelOpenAttempt).catch(() =>
         respond({ id: req.id, error: err(ERR.INTERNAL, 'internal error') })
       )
     })
   })
 
-  // Approval window closed without a decision = user rejection (spec §7.4).
+  // Approval popup window closed without a decision = user rejection (spec §7.4).
   chrome.windows.onRemoved.addListener(windowId => {
     const reqId = windowToReq.get(windowId)
     if (!reqId) return

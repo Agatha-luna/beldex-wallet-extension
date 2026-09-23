@@ -3,9 +3,16 @@
     "Built-in defaults per network. These are overridable per-key from .env (see .env.example)",
     "— .env wins, so a developer pointing at a local LWS never has to edit this file.",
     "",
+    "EVERY network here ships in EVERY build: the chain is a runtime, per-wallet choice.",
+    "BDX_NETWORK / --env network=... only pick which one a fresh wallet starts on.",
+    "",
     "There is deliberately no `hosts` list here: webpack derives the manifest's host_permissions",
-    "from the resolved URLs below (origin, port stripped — Chrome match patterns forbid ports),",
-    "so an endpoint change can never leave the extension without permission to fetch it."
+    "from the union of the resolved URLs below (origin, port stripped — Chrome match patterns",
+    "forbid ports), so an endpoint change can never leave the extension without permission to",
+    "fetch it, and switching chains can never land on an ungranted host.",
+    "",
+    "Address prefixes are NOT here — they are consensus constants, and live beside the encoder",
+    "in src/lib/signMessage.ts (ADDRESS_PREFIX)."
   ],
   "mainnet": {
     "nettype": 0,
@@ -25,6 +32,6 @@
     "bnsLookup": "https://testnet.beldex.dev/api/bnslookup",
     "explorerTx": "https://testnet.beldex.dev/tx/",
     "priceUrl": "https://api.coingecko.com/api/v3/simple/price?ids=beldex&vs_currencies=usdt,usd",
-    "showFiat": true
+    "showFiat": false
   }
 }

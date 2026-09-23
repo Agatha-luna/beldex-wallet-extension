@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { sendToBackground, WalletMeta } from '../../lib/messages'
 import { truncateMiddle } from '../../lib/format'
 import { Onboarding } from './Onboarding'
+import { CONFIG } from '../../lib/config'
 
 export function Unlock({ walletName, wallets, onChanged }:
   { walletName: string; wallets: WalletMeta[]; onChanged: () => void }) {
@@ -16,7 +17,10 @@ export function Unlock({ walletName, wallets, onChanged }:
     return <Onboarding addMode onDone={onChanged} onCancel={() => setAdding(false)} />
   }
 
-  const others = wallets.filter(w => !w.active)
+  // Only wallets on the active chain: SWITCH_WALLET refuses the others, and
+  // bringing one onto this chain needs an unlocked session, which we do not
+  // have here. They are offered in wallet selection instead.
+  const others = wallets.filter(w => !w.active && w.networks.includes(CONFIG.NETWORK))
 
   const unlock = async () => {
     setBusy(true)
@@ -41,6 +45,10 @@ export function Unlock({ walletName, wallets, onChanged }:
         </div>
         <h2 style={{ marginTop: 18, marginBottom: 4 }}>{walletName || 'Welcome back'}</h2>
         <p className="tagline">Unlock this wallet</p>
+        {/* Which chain this wallet will open on. The network switcher lives in
+            Settings, which is unreachable while locked, so stating it here keeps
+            a locked user from wondering where they are. */}
+        <span className={CONFIG.IS_TESTNET ? 'net-badge' : 'net-label'}>{CONFIG.NETWORK_LABEL}</span>
       </div>
       <div className="card">
         <input type="password" autoFocus placeholder="Password" value={password}

@@ -4,7 +4,7 @@ import { truncateMiddle } from '../../lib/format'
 import { newIntegratedAddress } from '../../lib/bridge'
 import { deriveShortPid, savePidLabel } from '../../lib/pidLabels'
 
-export function Receive({ address, onBack }: { address: string; onBack: () => void }) {
+export function Receive({ address, ticker, onBack }: { address: string; ticker?: string; onBack: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [shown, setShown] = useState(address) // primary or a generated unique address
   const [paymentId, setPaymentId] = useState('')
@@ -70,7 +70,7 @@ export function Receive({ address, onBack }: { address: string; onBack: () => vo
 
   return (
     <div className="card center receive-card">
-      <h2 style={{ marginBottom: 8 }}>Receive BDX</h2>
+      <h2 style={{ marginBottom: 8 }}>Receive {ticker || 'BDX'}</h2>
       <div className="qr-box">
         <canvas ref={canvasRef} />
       </div>

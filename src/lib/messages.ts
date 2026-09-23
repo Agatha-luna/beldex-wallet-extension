@@ -1,5 +1,7 @@
 // Typed message contracts between popup and background service worker.
 
+import type { NetworkName } from './config'
+
 export interface WalletSecrets {
   mnemonic: string
   address: string
@@ -13,7 +15,14 @@ export interface WalletSecrets {
 export interface WalletMeta {
   id: string
   name: string
-  address: string // may be '' for legacy wallets until first unlock backfills it
+  /** Address on the ACTIVE network, or '' when this wallet is not on it (and
+   *  for a wallet that has never been unlocked — the per-network address map is
+   *  backfilled from the public keys at unlock, see background/index.ts). */
+  address: string
+  /** Every network this wallet appears on. A wallet is normally created on one
+   *  chain, and can be made available on others explicitly
+   *  (ADD_WALLET_TO_NETWORK) — it is the same keypair either way. */
+  networks: NetworkName[]
   active: boolean
 }
 
@@ -32,7 +41,34 @@ export type BgRequest =
   | { type: 'SET_AUTOLOCK'; minutes: number }
   | { type: 'TOUCH' } // REAL user activity (pointer/keyboard/focus) — re-arms auto-lock
   | { type: 'KEEPALIVE' } // keep the MV3 worker warm ONLY — must NOT re-arm auto-lock
+  // Selects the active wallet WITHIN the current network. It never changes the
+  // network: only wallets that are on the active chain are selectable, so
+  // picking one cannot move the user to a different chain.
   | { type: 'SWITCH_WALLET'; id: string }
+  // Changes the ACTIVE NETWORK. This is a global setting, not a per-wallet one —
+  // the active wallet is remembered separately for each network, so switching
+  // chains restores whichever wallet was last used there.
+  //
+  // The session survives when the same wallet is on both chains (the account is
+  // one keypair; only the address encoding differs, so it is re-encoded rather
+  // than re-derived). It necessarily ends when the target chain's wallet is a
+  // DIFFERENT wallet, whose password we do not hold.
+  //
+  // No password: this reveals nothing and spends nothing — it re-encodes an
+  // address the session already holds. The panel still confirms it, so the
+  // consequences are stated before the chain moves. Refused while a send holds
+  // the global lock, since a transaction under construction is bound to one
+  // chain's unspent set.
+  //
+  // Refused with code WALLET_NOT_ON_NETWORK when the ACTIVE wallet is not on the
+  // target chain: the user is asked whether to bring it along, and declining
+  // must leave them where they are rather than silently landing them on some
+  // other wallet. `addActiveWallet` is that yes.
+  | { type: 'SWITCH_NETWORK'; network: NetworkName; addActiveWallet?: boolean }
+  // Make a wallet usable on another chain. Additive and idempotent: it is the
+  // same keypair everywhere, so this only decides where the wallet is OFFERED.
+  // Drives the "use this wallet on <network>" step in wallet selection.
+  | { type: 'ADD_WALLET_TO_NETWORK'; id: string; network: NetworkName }
   | { type: 'RENAME_WALLET'; name: string } // renames the active wallet
   | { type: 'WIPE'; password: string } // deletes the ACTIVE wallet only (password-gated)
   // ---- dapp bridge (approval UI + Connected Sites settings) ----
@@ -65,6 +101,10 @@ export interface PendingApproval {
   sessionGeneration: string | null
   walletName: string
   walletAddress: string
+  /** The chain this request was reviewed on. Part of the immutable approval
+   *  context: switching networks voids every pending approval, because the
+   *  address shown on the card is only valid for the network it was drawn on. */
+  network: NetworkName
 }
 
 export type BgResponse =
@@ -76,6 +116,9 @@ export type BgResponse =
       minutes?: number
       walletName?: string
       wallets?: WalletMeta[]
+      /** The active network (global). The panel hydrates CONFIG from this before
+       *  any backend call, so the UI and the fetches can never disagree. */
+      network?: NetworkName
       // DAPP_BEGIN_SEND: the atomic execution grant handed to the approval card.
       executionToken?: string
       operationId?: string
@@ -89,7 +132,13 @@ export type BgResponse =
       origins?: Array<{ origin: string; grantedAt: number }>
       activeSite?: { origin: string; connected: boolean } | null
     }
-  | { ok: false; error: string }
+  | {
+      ok: false
+      error: string
+      /** Machine-readable reason, so callers branch on intent rather than on
+       *  the wording of `error`. Currently: WALLET_NOT_ON_NETWORK. */
+      code?: 'WALLET_NOT_ON_NETWORK'
+    }
 
 export function sendToBackground(req: BgRequest): Promise<BgResponse> {
   return chrome.runtime.sendMessage(req)
