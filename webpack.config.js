@@ -145,6 +145,9 @@ module.exports = (env = {}) => {
         m.browser_specific_settings.gecko.id = 'beldex-wallet-testnet@beldex.io'
       }
     }
+    if (m.description.length > 132) {
+      throw new Error(`Manifest description is ${m.description.length} characters; maximum is 132.`)
+    }
     return JSON.stringify(m, null, 2) + '\n'
   }
 

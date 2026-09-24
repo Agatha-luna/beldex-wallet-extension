@@ -103,6 +103,17 @@
         text-transform: uppercase;
         flex: 0 1 auto; min-width: 0;
       }
+      /* Header left cluster: active-wallet switcher + chain label. Uses the
+         display font (Michroma) so the in-app title matches the app's own
+         branding; not uppercased — the wallet name shows as the user typed it. */
+      .header-wallet {
+        display: flex; align-items: center; gap: 8px;
+        flex: 1 1 auto; min-width: 0;
+      }
+      .header-wallet .btn-wallet-switch {
+        font-family: var(--display); font-size: 13px; font-weight: 400;
+        flex: 0 1 auto; min-width: 0; max-width: 240px;
+      }
       .header-actions {
         display: flex; align-items: center; gap: 4px;
         flex: 0 1 auto; min-width: 0;
