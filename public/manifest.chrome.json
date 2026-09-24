@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Beldex Wallet",
   "version": "1.2.0",
-  "description": "A light wallet for Beldex (BDX). Non-custodial: spend keys never leave your browser. Connects to Beldex dapps (bdx-web3js) with per-site approval.",
+  "description": "Non-custodial Beldex (BDX) wallet. Send, receive, and connect to dapps with per-site approval.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
