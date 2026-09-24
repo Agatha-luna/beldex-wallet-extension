@@ -53,6 +53,9 @@ function ClockIcon() {
 function BellIcon() {
   return <svg {...ICON_PROPS}><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.7 21a2 2 0 0 1-3.4 0" /></svg>
 }
+function NodeIcon() {
+  return <svg {...ICON_PROPS}><rect x="3" y="4" width="18" height="6" rx="1" /><rect x="3" y="14" width="18" height="6" rx="1" /><path d="M7 7h.01M7 17h.01" /></svg>
+}
 function GlobeIcon() {
   return <svg {...ICON_PROPS}><circle cx="12" cy="12" r="9" /><path d="M3 12h18" /><path d="M12 3c2.5 3 2.5 15 0 18M12 3c-2.5 3-2.5 15 0 18" /></svg>
 }
@@ -92,7 +95,7 @@ const SECRET_LABELS: Record<string, { title: string; field: keyof WalletSecrets;
 
 export function Settings({
   walletName, network,
-  onBack, onWiped, onChanged, onLock, onRegisterToken
+  onBack, onWiped, onChanged, onLock, onRegisterToken, onRegisterMasternode
 }: {
   walletName: string
   network: NetworkName
@@ -101,6 +104,7 @@ export function Settings({
   onChanged: () => void
   onLock: () => void
   onRegisterToken: () => void
+  onRegisterMasternode: () => void
 }) {
   const [item, setItem] = useState<Item>('menu')
   const [password, setPassword] = useState('')
@@ -440,10 +444,17 @@ export function Settings({
       </div>
 
       <div className="settings-divider" />
-      <div className="settings-section-label">Tokens</div>
+      <div className="settings-section-label">Register</div>
       <div className="settings-item" onClick={onRegisterToken}>
         <span className="icon"><PlusCircleIcon /></span>
         <span className="label">Register Token</span>
+        <span className="chev">›</span>
+      </div>
+      {/* Kept beside Register Token rather than on the main screen: both are
+          rare, deliberate actions that look like a send but are not one. */}
+      <div className="settings-item" onClick={onRegisterMasternode}>
+        <span className="icon"><NodeIcon /></span>
+        <span className="label">Register Master Node</span>
         <span className="chev">›</span>
       </div>
 

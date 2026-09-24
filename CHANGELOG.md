@@ -54,6 +54,26 @@
 
 ### Added
 
+- **Master node registration.** Settings → Register → *Register Master Node*
+  takes the full `register_master_node …` command printed by
+  `prepare_registration` on the operator's beldexd and submits it as a
+  registration transaction (`isRegister` + `registration_string` on the core's
+  send flow — the only two registration keys the WASM's parser recognises).
+
+  The stake, operator cut, contributor addresses and expiry all come from that
+  string, so the wallet describes no destination of its own and asks for no
+  amount. Registration always goes at normal priority, and is not recorded as a
+  local pending BDX transfer (the BDX it moves is stake and fee, not a payment).
+
+  Placed beside Register Token rather than on the main screen: both are rare,
+  deliberate actions that resemble a send without being one. The review step
+  shows the pasted string in full — truncating it would hide a paste error in
+  the one value being confirmed.
+
+  Validation is non-empty only. The string's grammar is defined by
+  `prepare_registration` and enforced by consensus; a client-side guess at it
+  would reject valid strings the moment the format changed.
+
 - **Runtime mainnet/testnet switching.** The chain is no longer fixed at build
   time; it is selected in Settings → Network (see the model notes above).
 
