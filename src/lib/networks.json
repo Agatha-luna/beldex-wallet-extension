@@ -17,7 +17,7 @@
   "mainnet": {
     "nettype": 0,
     "label": "Mainnet",
-    "lws": "https://lwsapi.beldex.io",
+    "lws": "https://lwsapi.rpcnode.stream",
     "daemonRpc": "https://explorer.beldex.io/json_rpc",
     "bnsLookup": "https://explorer.beldex.io/api/bnslookup",
     "explorerTx": "https://explorer.beldex.io/tx/",
@@ -27,7 +27,7 @@
   "testnet": {
     "nettype": 1,
     "label": "Testnet",
-    "lws": "https://lwsapi.beldex.dev",
+    "lws": "https://lwstestapi.rpcnode.stream",
     "daemonRpc": "http://209.126.86.93:29091/json_rpc",
     "bnsLookup": "https://testnet.beldex.dev/api/bnslookup",
     "explorerTx": "https://testnet.beldex.dev/tx/",
