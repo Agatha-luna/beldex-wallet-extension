@@ -105,9 +105,15 @@ module.exports = (env = {}) => {
   // endpoint in .env can never leave the extension unable to fetch it, and
   // switching chains can never land on a host the manifest didn't grant. The
   // price host is included only for networks with fiat on.
+  // daemonRpc is deliberately NOT derived: it is declared for future daemon
+  // queries but no code path calls it today, and granting a host the extension
+  // never contacts is exactly the kind of unexplained permission that draws a
+  // store reviewer's attention (the testnet daemon is a plaintext http IP, which
+  // looks worse still). Add it back to this list the moment something fetches
+  // it, or the call will fail with no permission and no obvious reason.
   const urls = []
   for (const [name, n] of Object.entries(nets)) {
-    const own = [n.lws, n.daemonRpc, n.bnsLookup, n.explorerTx]
+    const own = [n.lws, n.bnsLookup, n.explorerTx]
     if (n.showFiat) own.push(n.priceUrl)
     for (const u of own) {
       try { new URL(u) } catch { throw new Error(`Invalid URL in network config (${name}): "${u}"`) }
@@ -121,7 +127,7 @@ module.exports = (env = {}) => {
   // are secure contexts, so the browser blocks plaintext fetches as mixed
   // content. Warn rather than fail — a local daemon over http is a legitimate
   // dev setup on some setups, and DAEMON_RPC_URL is currently unused.
-  for (const u of urls) {
+  for (const u of [...urls, ...Object.values(nets).map(n => n.daemonRpc)]) {
     if (new URL(u).protocol === 'http:' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(new URL(u).hostname)) {
       console.warn(`[beldex] WARNING: ${u} is plaintext http. Extension pages are secure contexts, `
         + 'so the browser will block this fetch as mixed content. Use https for anything the wallet actually calls.')
