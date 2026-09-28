@@ -90,6 +90,12 @@ export async function newIntegratedAddress(
 export interface TokenRegistrationInfo {
   collateral_amount: string
   collateral_lock_blocks: string
+  /** What a registration pays on top of the collateral, which unlike the
+   *  collateral is not returned: half burned, half to governance. Absent on a
+   *  bridge built before the node started charging it. */
+  registration_fee_amount?: string
+  registration_fee_burn_amount?: string
+  registration_fee_governance_amount?: string
   min_token_outputs: string
   min_fork_version: string
   max_ticker_length: string

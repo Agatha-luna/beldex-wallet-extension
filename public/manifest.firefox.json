@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Beldex Wallet",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Non-custodial Beldex (BDX) wallet. Send, receive, and connect to dapps with per-site approval.",
   "browser_specific_settings": {
     "gecko": {
@@ -64,7 +64,7 @@
     "notifications"
   ],
   "host_permissions": [
-    "https://lwsapi.beldex.io/*",
+    "https://lwsapi.rpcnode.stream/*",
     "https://explorer.beldex.io/*",
     "https://api.coingecko.com/*"
   ],

@@ -517,9 +517,16 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
       if (maxSupplyAtomic > UINT64_MAX) {
         setFormError(`Max supply is too large at ${dp} decimals — reduce the supply or the decimal count`); return
       }
-      // The fee is BDX regardless, and collateral is locked in BDX too.
-      if (unlocked !== null && unlocked <= 0n) {
-        setFormError('Registering a token still needs BDX for the network fee and collateral'); return
+      // The fee is BDX regardless, and collateral is locked in BDX too. The
+      // node refuses a registration that cannot cover the collateral plus the
+      // registration fee, so say so here rather than after building it.
+      const regCost = limits
+        ? BigInt(limits.collateral_amount) + BigInt(limits.registration_fee_amount ?? '0')
+        : 0n
+      if (unlocked !== null && (unlocked <= 0n || unlocked < regCost)) {
+        setFormError(regCost > 0n
+          ? `Registering a token needs ${fmtBDX(regCost)} BDX unlocked (collateral plus registration fee), plus the network fee`
+          : 'Registering a token still needs BDX for the network fee and collateral'); return
       }
       setReview({ target: '', kind: 'register' })
       return
@@ -1125,7 +1132,11 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
               {tokenRegInfo
                 ? <>Registering locks {fmtBDX(BigInt(tokenRegInfo.collateral_amount))} BDX for{' '}
                     {Number(tokenRegInfo.collateral_lock_blocks).toLocaleString()} blocks. The collateral is
-                    returned when the lock expires; the network fee is separate.</>
+                    returned when the lock expires.
+                    {tokenRegInfo.registration_fee_amount
+                      ? <> It also costs a {fmtBDX(BigInt(tokenRegInfo.registration_fee_amount))} BDX registration
+                          fee (half burned, half to governance), which is not returned.</>
+                      : null}{' '}The network fee is separate.</>
                 : 'Registering locks BDX collateral for a fixed period and mints the initial supply to this wallet; the network fee is separate.'}
             </p>
             <input placeholder="Ticker (e.g. POP)" value={tokenTicker}
@@ -1198,8 +1209,15 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
                 <div className="detail-row"><span className="muted">Decimals</span><span>{tokenDecimals}</span></div>
                 <div className="detail-row"><span className="muted">Initial supply</span><span>{tokenSupply.trim() || '0'}</span></div>
                 <div className="detail-row"><span className="muted">Max supply</span><span>{tokenMaxSupply.trim()}</span></div>
+                {tokenRegInfo && (
+                  <div className="detail-row"><span className="muted">Collateral (locked)</span><span>{fmtBDX(BigInt(tokenRegInfo.collateral_amount))} BDX</span></div>
+                )}
+                {tokenRegInfo?.registration_fee_amount && (
+                  <div className="detail-row"><span className="muted">Registration fee</span><span>{fmtBDX(BigInt(tokenRegInfo.registration_fee_amount))} BDX</span></div>
+                )}
                 <p className="warn" style={{ marginTop: 10 }}>
-                  ⚠ Registration locks BDX collateral and mints the initial supply to this wallet. This cannot be undone.
+                  ⚠ Registration locks BDX collateral{tokenRegInfo?.registration_fee_amount ? ', pays a registration fee that is not returned,' : ''} and
+                  mints the initial supply to this wallet. This cannot be undone.
                 </p>
               </>
             ) : (

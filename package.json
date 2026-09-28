@@ -1,6 +1,6 @@
 {
   "name": "beldex-wallet-extension",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Beldex wallet browser extension (Manifest V3) built on the Beldex LWS wasm core",
   "engines": {
@@ -20,7 +20,7 @@
     "test": "node --disallow-code-generation-from-strings --experimental-strip-types --test test/*.test.mjs"
   },
   "dependencies": {
-    "@bdxi/beldex-app-bridge": "3.0.1",
+    "@bdxi/beldex-app-bridge": "file:vendor/beldex-app-bridge",
     "@fontsource/michroma": "^5.2.8",
     "@fontsource/space-mono": "^5.2.9",
     "@noble/curves": "^1.9.7",

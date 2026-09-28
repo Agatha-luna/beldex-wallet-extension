@@ -172,7 +172,7 @@ separate storage.
 |---|---|---|
 | `NETTYPE` | 0 | 1 |
 | Address prefix | 209 | 53 |
-| LWS | `lwsapi.beldex.io` | `lwsapi.beldex.dev` |
+| LWS | `lwsapi.rpcnode.stream` | `lwstestapi.rpcnode.stream` |
 | Explorer / BNS | `explorer.beldex.io` | `testnet.beldex.dev` |
 | Daemon JSON-RPC | `explorer.beldex.io` | `209.126.86.93:29091` |
 
