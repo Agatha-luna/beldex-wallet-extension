@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Beldex Wallet",
-  "version": "1.0.1",
+  "version": "1.0.0",
   "description": "Non-custodial Beldex (BDX) wallet. Send, receive, and connect to dapps with per-site approval.",
   "browser_specific_settings": {
     "gecko": {
