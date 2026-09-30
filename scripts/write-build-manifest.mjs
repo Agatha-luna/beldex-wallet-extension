@@ -89,12 +89,20 @@ if (process.argv[2] === '--check') {
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 const networks = JSON.parse(readFileSync(join(root, 'src/lib/networks.json'), 'utf8'))
 
-// Official releases are mainnet with NO overrides (package.sh enforces no .env
-// and no BDX_*/MAINNET_*/TESTNET_* ambient environment), so the resolved
-// configuration IS networks.json's mainnet block.
-const net = networks.mainnet
-const expectedUrls = [net.lws, net.daemonRpc, net.bnsLookup, net.explorerTx]
-if (net.showFiat) expectedUrls.push(net.priceUrl)
+// Official releases take NO overrides (package.sh enforces no .env and no
+// BDX_*/MAINNET_*/TESTNET_* ambient environment), so the resolved
+// configuration IS networks.json. Every network in it ships in every build
+// (the chain is a runtime choice), so the manifest must grant the union of
+// their hosts: lws, bnsLookup and explorerTx, plus priceUrl where fiat is on.
+// daemonRpc is not granted: nothing fetches it (see webpack.config.js).
+const shipped = Object.fromEntries(
+  Object.entries(networks).filter(([name]) => !name.startsWith('_')) // skip the _comment block
+)
+const expectedUrls = []
+for (const net of Object.values(shipped)) {
+  expectedUrls.push(net.lws, net.bnsLookup, net.explorerTx)
+  if (net.showFiat) expectedUrls.push(net.priceUrl)
+}
 const expectedHosts = [...new Set(expectedUrls.map(hostPattern))]
 
 const targets = {}
@@ -125,8 +133,8 @@ const manifest = {
   packageLockSha256: sha256(readFileSync(join(root, 'package-lock.json'))),
   nodeVersion: process.version,
   npmVersion: npmVersion(),
-  network: 'mainnet',
-  resolvedConfig: net,          // non-secret build-time endpoints, as reviewed
+  network: 'mainnet',           // the chain a new wallet starts on; all of resolvedConfig ships
+  resolvedConfig: shipped,      // non-secret build-time endpoints, as reviewed
   hostPermissions: expectedHosts,
   targets,
   // This manifest is an attestation only when accompanied by its detached
