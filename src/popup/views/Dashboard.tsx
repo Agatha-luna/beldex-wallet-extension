@@ -16,6 +16,7 @@ import { getPidLabels } from '../../lib/pidLabels'
 import { looksLikeBnsName, resolveBnsWallet } from '../../lib/bns'
 import { decodeAddress, tokenRegistrationInfo, TokenRegistrationInfo } from '../../lib/bridge'
 import { sessionStore } from '../../lib/sessionStore'
+import { instantInfo } from '../../lib/instantInfo'
 import { CONFIG, NETWORKS, NETWORK_NAMES } from '../../lib/config'
 import type { NetworkName } from '../../lib/config'
 import { getTokenBalances, fetchAllTokenOutputs, isTokenLookupUnsupported } from '../../lib/tokenApi'
@@ -63,6 +64,9 @@ interface TokenLegDisplay {
   amount: string
   ticker: string
   extra: number
+  /** False while the token's details (decimals, ticker) aren't loaded: amount
+   *  is then raw atomic units and ticker a shortened id, not fit to show. */
+  known: boolean
 }
 
 /**
@@ -83,14 +87,15 @@ function topTokenLeg(legs: TokenLeg[] | undefined, infoById: Map<string, TokenRo
         net,
         magnitude: absBig(net),
         decimals: info?.decimalPoint ?? 0,
-        ticker: info?.ticker || shortenTokenId(l.token_id, 6, 4)
+        ticker: info?.ticker || shortenTokenId(l.token_id, 6, 4),
+        known: !!info
       }
     })
     .filter(l => l.magnitude !== 0n)
   if (!moved.length) return null
   moved.sort((a, b) => (a.magnitude === b.magnitude ? 0 : a.magnitude < b.magnitude ? 1 : -1))
   const top = moved[0]
-  return { outgoing: top.net < 0n, amount: fmtToken(top.magnitude, top.decimals), ticker: top.ticker, extra: moved.length - 1 }
+  return { outgoing: top.net < 0n, amount: fmtToken(top.magnitude, top.decimals), ticker: top.ticker, extra: moved.length - 1, known: top.known }
 }
 
 export function Dashboard({ address, walletName, wallets, network, onLocked }:
@@ -182,6 +187,9 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
   const [tokensLoading, setTokensLoading] = useState(false)
   // null = no lookup attempted yet; false = this server has no token endpoints.
   const [tokensSupported, setTokensSupported] = useState<boolean | null>(null)
+  // Set once the first token lookup has finished, however it went. Until then
+  // a token amount whose details haven't arrived shows a skeleton, not raw units.
+  const [tokensLoadedOnce, setTokensLoadedOnce] = useState(false)
   // Protocol constants (collateral, descriptor limits) come from the bridge so
   // they can't drift out of step with consensus. Null on an older bridge; the
   // form then falls back to built-in limits.
@@ -291,6 +299,7 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
       if (isTokenLookupUnsupported(e)) setTokensSupported(false)
     } finally {
       setTokensLoading(false)
+      setTokensLoadedOnce(true)
     }
   }
 
@@ -374,10 +383,12 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
     let cancelled = false
     ;(async () => {
       try {
-        // Instant display from the background sync cache while we fetch fresh data.
+        // Instant display while we fetch fresh data: this wallet's last
+        // key-image-corrected figures, never the raw sync cache (see instantInfo).
         // storage.session may be absent (Firefox < 115); it's only an optimization.
-        const cached = (await (chrome.storage as any).session?.get('sync_cache'))?.['sync_cache']
-        if (cached?.info && !cancelled) setInfo(cached.info)
+        const stored = await (chrome.storage as any).session?.get(['sync_cache', 'corrected_balance'])
+        const early = instantInfo(address, stored?.sync_cache, stored?.corrected_balance)
+        if (early && !cancelled) setInfo(early)
 
         const s = await sendToBackground({ type: 'GET_SECRETS' })
         if (!s.ok || !s.secrets) { onLocked(); return }
@@ -927,7 +938,9 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
                           </div>
                         </div>
                         <div className={`amt ${incoming ? 'in' : 'out'}`}>
-                          {leg
+                          {leg && !leg.known && !tokensLoadedOnce
+                            ? <span className="skel" style={{ width: 64, height: 12 }} />
+                            : leg
                             ? <>{incoming ? '+' : '−'}{groupDigits(leg.amount)} {leg.ticker}
                                 {leg.extra > 0 && <span className="muted" style={{ fontWeight: 400 }}> +{leg.extra}</span>}</>
                             : <>{incoming ? '+' : '−'}{fmtBDX(absBig(delta))}</>}
@@ -1442,7 +1455,9 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
           : Math.max(0, chainHeight - Number(selectedTx.height) + 1)
         const rows: Array<[string, React.ReactNode]> = [
           ['Type', <span className={incoming ? 'ok' : 'error'}>{incoming ? '↓ Received' : '↑ Sent'}</span>],
-          ['Amount', leg
+          ['Amount', leg && !leg.known && !tokensLoadedOnce
+            ? <span className="skel" style={{ width: 90, height: 12 }} />
+            : leg
             ? `${incoming ? '+' : '−'}${groupDigits(leg.amount)} ${leg.ticker}`
             : `${incoming ? '+' : '−'}${fmtBDX(absBig(delta))} BDX`],
           ['Status', selectedTx.mempool
@@ -1459,6 +1474,10 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
           const net = parseAtomic(l.received) - parseAtomic(l.sent)
           if (net === 0n) continue
           const info = tokenInfoById.get(l.token_id)
+          if (!info && !tokensLoadedOnce) {
+            rows.push(['Token', <span className="skel" style={{ width: 90, height: 12 }} />])
+            continue
+          }
           const ticker = info?.ticker || shortenTokenId(l.token_id, 8, 4)
           const decimals = info?.decimalPoint ?? 0
           rows.push([`Token (${ticker})`, `${net < 0n ? '−' : '+'}${groupDigits(fmtToken(absBig(net), decimals))} ${ticker}`])
