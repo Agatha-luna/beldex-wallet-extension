@@ -1,6 +1,6 @@
 # Beldex Wallet: build notes for AMO reviewers
 
-- **Add-on:** Beldex Wallet 1.0.0
+- **Add-on:** Beldex Wallet 1.0.1
 - **Add-on ID:** `beldex-wallet@beldex.io`
 - **Publisher:** the Beldex team (https://beldex.io)
 - **Source:** https://github.com/Beldex-Coin/beldex-wallet-extension
