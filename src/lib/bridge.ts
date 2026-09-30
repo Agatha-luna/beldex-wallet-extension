@@ -106,14 +106,15 @@ export interface TokenRegistrationInfo {
 /**
  * Protocol constants for token registration (collateral, lock period,
  * descriptor limits) — kept in the bridge rather than duplicated here so they
- * can't drift out of step with consensus. Returns null on an older bridge
+ * can't drift out of step with consensus. The registration fee differs between
+ * networks, so this asks for the active one. Returns null on an older bridge
  * build that doesn't export this call; callers fall back to built-in limits.
  */
 export async function tokenRegistrationInfo(): Promise<TokenRegistrationInfo | null> {
   const bridge = await getBridge()
   if (typeof bridge.tokenRegistrationInfo !== 'function') return null
   try {
-    return bridge.tokenRegistrationInfo()
+    return bridge.tokenRegistrationInfo(CONFIG.NETTYPE)
   } catch {
     return null
   }

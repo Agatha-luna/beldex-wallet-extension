@@ -97,3 +97,18 @@ test('async__send_funds drives the send flow through the marshalled callbacks', 
   })
   assert.equal(reached, true)
 })
+
+test('tokenRegistrationInfo charges the registration fee of the named network', () => {
+  // Mainnet burns 500 BDX and pays 500 to governance; testnet 50 and 50. A
+  // mainnet figure on testnet is rejected by the node ("requires exactly
+  // 50000000000 burned"), so the network must reach the wasm.
+  const main = bridge.tokenRegistrationInfo(MAINNET)
+  assert.equal(main.registration_fee_burn_amount, '500000000000')
+  assert.equal(main.registration_fee_governance_amount, '500000000000')
+  assert.equal(main.registration_fee_amount, '1000000000000')
+  const testnet = bridge.tokenRegistrationInfo(1)
+  assert.equal(testnet.registration_fee_burn_amount, '50000000000')
+  assert.equal(testnet.registration_fee_governance_amount, '50000000000')
+  assert.equal(testnet.registration_fee_amount, '100000000000')
+  assert.equal(testnet.collateral_amount, main.collateral_amount)
+})

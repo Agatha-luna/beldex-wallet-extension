@@ -63,9 +63,10 @@ class MyMoneroLibAppBridgeClass extends MyMoneroCoreBridgeEssentialsClass
 		}
 		return args;
 	}
-	tokenRegistrationInfo()
+	// The registration fee differs between networks, so name the one in use.
+	tokenRegistrationInfo(nettype)
 	{
-		return JSON.parse(this.Module.token_registration_info());
+		return JSON.parse(this.Module.token_registration_info(nettype_utils.nettype_to_API_string(nettype)));
 	}
 	async__send_funds(fn_args)
 	{
