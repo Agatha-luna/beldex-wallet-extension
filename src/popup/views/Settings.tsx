@@ -501,6 +501,10 @@ export function Settings({
         <span className="icon"><LockIcon /></span>
         <span className="label">Lock</span>
       </div>
+      {/* Read from the installed manifest, so it always matches the build. */}
+      <p className="muted center" style={{ margin: '12px 0 4px', fontSize: 11 }}>
+        Version {chrome.runtime.getManifest().version}
+      </p>
     </div>
   )
 }
