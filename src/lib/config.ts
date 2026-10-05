@@ -38,6 +38,10 @@ export interface ResolvedNetwork {
   explorerTx: string
   priceUrl: string
   showFiat: boolean
+  /** Whether token registration is offered on this network at all. */
+  tokenRegistration: boolean
+  /** Block the privacy-token hard fork activates at, when scheduled. */
+  tokenForkHeight: number | null
   autoLockMinutes: number
 }
 
@@ -111,6 +115,8 @@ export const CONFIG = {
   // value is actively misleading now that a user can switch chains in-app.
   get PRICE_URL(): string { return cur().priceUrl },
   get SHOW_FIAT(): boolean { return cur().showFiat },
+  get TOKEN_REGISTRATION(): boolean { return cur().tokenRegistration },
+  get TOKEN_FORK_HEIGHT(): number | null { return cur().tokenForkHeight },
 
   // Serial-bridge nettype convention (see @bdxi/beldex-nettype):
   // 0 = MAINNET, 1 = TESTNET, 2 = DEVNET. Drives seed/address generation and

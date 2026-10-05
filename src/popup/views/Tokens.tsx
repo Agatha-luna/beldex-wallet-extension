@@ -28,7 +28,8 @@ export function Tokens({ rows, loading, supported, onSelect, onRegister, onBack 
   /** null = no lookup attempted yet; false = this server has no token endpoints. */
   supported: boolean | null
   onSelect: (tokenId: string) => void
-  onRegister: () => void
+  /** Absent on a network that does not offer token registration. */
+  onRegister?: () => void
   onBack: () => void
 }) {
   return (
@@ -44,7 +45,9 @@ export function Tokens({ rows, loading, supported, onSelect, onRegister, onBack 
       {loading && rows.length === 0 && <p className="muted center">Loading…</p>}
 
       {!loading && rows.length === 0 && (
-        <p className="muted center">No tokens yet. Receive one, or register a new token below.</p>
+        <p className="muted center">
+          {onRegister ? 'No tokens yet. Receive one, or register a new token below.' : 'No tokens yet.'}
+        </p>
       )}
 
       {rows.map(r => {
@@ -71,7 +74,7 @@ export function Tokens({ rows, loading, supported, onSelect, onRegister, onBack 
 
       <div className="row" style={{ marginTop: 12 }}>
         <button className="btn-ghost" onClick={onBack}>Back</button>
-        <button className="btn-primary" onClick={onRegister}>+ Register token</button>
+        {onRegister && <button className="btn-primary" onClick={onRegister}>+ Register token</button>}
       </div>
     </div>
   )

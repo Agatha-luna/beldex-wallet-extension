@@ -11,6 +11,9 @@
     "forbid ports), so an endpoint change can never leave the extension without permission to",
     "fetch it, and switching chains can never land on an ungranted host.",
     "",
+    "tokenRegistration turns the token registration screens on for a network. tokenForkHeight is",
+    "the block the privacy-token hard fork activates at there (shown while it is not live yet).",
+    "",
     "Address prefixes are NOT here — they are consensus constants, and live beside the encoder",
     "in src/lib/signMessage.ts (ADDRESS_PREFIX)."
   ],
@@ -22,7 +25,9 @@
     "bnsLookup": "https://explorer.beldex.io/api/bnslookup",
     "explorerTx": "https://explorer.beldex.io/tx/",
     "priceUrl": "https://api.coingecko.com/api/v3/simple/price?ids=beldex&vs_currencies=usdt,usd",
-    "showFiat": true
+    "showFiat": true,
+    "tokenRegistration": false,
+    "tokenForkHeight": null
   },
   "testnet": {
     "nettype": 1,
@@ -32,6 +37,8 @@
     "bnsLookup": "https://testnet.beldex.dev/api/bnslookup",
     "explorerTx": "https://testnet.beldex.dev/tx/",
     "priceUrl": "https://api.coingecko.com/api/v3/simple/price?ids=beldex&vs_currencies=usdt,usd",
-    "showFiat": false
+    "showFiat": false,
+    "tokenRegistration": true,
+    "tokenForkHeight": 4242200
   }
 }

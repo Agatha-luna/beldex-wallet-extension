@@ -50,6 +50,18 @@ export function getAddressTxs(c: Credentials) {
   return post<any>('/get_address_txs', c)
 }
 
+/** The hard fork the chain is on, as the server reports it with the wallet's
+ *  outputs. An LWS that predates privacy tokens reports a fixed 17 here, which
+ *  correctly reads as "tokens not available through this server". */
+export async function getForkVersion(c: Credentials): Promise<number> {
+  const r = await post<any>('/get_unspent_outs', {
+    address: c.address, view_key: c.view_key, amount: '0', mixin: 9, use_dust: true, dust_threshold: '0'
+  })
+  const v = Number(r?.fork_version)
+  if (!Number.isFinite(v) || v <= 0) throw new Error('server did not report a fork version')
+  return v
+}
+
 // The send flow (lib/send.ts) hits /get_unspent_outs, /get_random_outs and
 // /submit_raw_tx directly via rawPost(), because the WASM builds those request
 // bodies itself — so there are intentionally no typed wrappers for them here.

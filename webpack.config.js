@@ -89,6 +89,9 @@ module.exports = (env = {}) => {
       explorerTx: cfg(`${P}_EXPLORER_TX_URL`) ?? base.explorerTx,
       priceUrl: cfg(`${P}_PRICE_URL`) ?? base.priceUrl,
       showFiat: bool(cfg(`${P}_SHOW_FIAT`), base.showFiat),
+      // Reviewed per-network settings, deliberately not overridable from .env.
+      tokenRegistration: base.tokenRegistration === true,
+      tokenForkHeight: Number.isInteger(base.tokenForkHeight) ? base.tokenForkHeight : null,
       autoLockMinutes
     }
   }

@@ -17,6 +17,7 @@ import { looksLikeBnsName, resolveBnsWallet } from '../../lib/bns'
 import { decodeAddress, tokenRegistrationInfo, TokenRegistrationInfo } from '../../lib/bridge'
 import { sessionStore } from '../../lib/sessionStore'
 import { instantInfo } from '../../lib/instantInfo'
+import { tokenGate, TokenGate } from '../../lib/tokenGate'
 import { CONFIG, NETWORKS, NETWORK_NAMES } from '../../lib/config'
 import type { NetworkName } from '../../lib/config'
 import { getTokenBalances, fetchAllTokenOutputs, isTokenLookupUnsupported } from '../../lib/tokenApi'
@@ -194,6 +195,9 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
   // they can't drift out of step with consensus. Null on an older bridge; the
   // form then falls back to built-in limits.
   const [tokenRegInfo, setTokenRegInfo] = useState<TokenRegistrationInfo | null>(null)
+  // Shown instead of the registration form while the token fork is not live.
+  const [tokenGateNotice, setTokenGateNotice] = useState<TokenGate | null>(null)
+  const [tokenGateChecking, setTokenGateChecking] = useState(false)
   // A third send-form mode alongside "send BDX" and "send a token": registers
   // a new token, minting the initial supply to this wallet and locking
   // collateral rather than paying it away.
@@ -717,6 +721,32 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
   const chainHeight = info ? Math.max(scanned, Number(info.blockchain_height ?? 0)) : 0
   const synced = info && scanned >= chainHeight
 
+  const openTokenRegistration = () => {
+    setSendAsset(''); setMnToggle(false); setTokenToggle(true); setTxResult(''); setFormError('')
+    setAssetPickerOpen(false); setPickerFromHome(false); setView('send')
+  }
+  /* Token registration is offered per network (networks.json), and even there
+     only opens once the server confirms the chain is on the token fork: the
+     node refuses a registration before it, so the form would only collect a
+     request that cannot succeed. Until then a notice explains why. */
+  const startTokenRegistration = async () => {
+    if (!CONFIG.TOKEN_REGISTRATION || !creds || tokenGateChecking) return
+    setTokenGateChecking(true)
+    let forkVersion: number | null = null
+    try { forkVersion = await lws.getForkVersion(creds) } catch { forkVersion = null }
+    setTokenGateChecking(false)
+    const gate = tokenGate({
+      enabled: CONFIG.TOKEN_REGISTRATION,
+      forkVersion,
+      needVersion: Number(tokenRegInfo?.min_fork_version) || 22,
+      forkHeight: CONFIG.TOKEN_FORK_HEIGHT,
+      height: chainHeight || null
+    })
+    if (gate.kind === 'open') openTokenRegistration()
+    else setTokenGateNotice(gate)
+  }
+  const registerTokenEntry = CONFIG.TOKEN_REGISTRATION ? () => { void startTokenRegistration() } : undefined
+
   return (
     <div className="wrap">
       <div className="header">
@@ -744,7 +774,7 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
         <Settings walletName={walletName} network={network}
           onBack={() => setView('home')} onWiped={onLocked} onChanged={onLocked}
           onLock={async () => { await sendToBackground({ type: 'LOCK' }); onLocked() }}
-          onRegisterToken={() => { setSendAsset(''); setMnToggle(false); setTokenToggle(true); setTxResult(''); setFormError(''); setAssetPickerOpen(false); setPickerFromHome(false); setView('send') }}
+          onRegisterToken={registerTokenEntry}
           onRegisterMasternode={() => { setSendAsset(''); setTokenToggle(false); setMnToggle(true); setTxResult(''); setFormError(''); setAssetPickerOpen(false); setPickerFromHome(false); setView('send') }} />
       )}
       {view === 'receive' && (
@@ -760,7 +790,7 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
           loading={tokensLoading}
           supported={tokensSupported}
           onSelect={tokenId => { setTokenDetailId(tokenId); setView('tokenDetail') }}
-          onRegister={() => { setSendAsset(''); setTokenToggle(true); setTxResult(''); setFormError(''); setAssetPickerOpen(false); setPickerFromHome(false); setView('send') }}
+          onRegister={registerTokenEntry}
           onBack={() => setView('home')}
         />
       )}
@@ -1445,6 +1475,46 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
           </div>
         )
       })()}
+
+      {tokenGateNotice && tokenGateNotice.kind !== 'open' && tokenGateNotice.kind !== 'disabled' && (
+        <div className="modal-overlay" onClick={() => setTokenGateNotice(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <h2>Token registration is not live yet</h2>
+            {tokenGateNotice.kind === 'not-live' && (
+              <>
+                <p className="warn" style={{ lineHeight: 1.5 }}>
+                  ⚠ Privacy tokens switch on with hard fork {tokenGateNotice.needVersion}
+                  {tokenGateNotice.forkHeight !== null
+                    ? <>, at block <b>{tokenGateNotice.forkHeight.toLocaleString()}</b> on {CONFIG.NETWORK_LABEL}.</>
+                    : <> on {CONFIG.NETWORK_LABEL}.</>}
+                </p>
+                {tokenGateNotice.height !== null && (
+                  <div className="detail-row"><span className="muted">Current block</span><span>{tokenGateNotice.height.toLocaleString()}</span></div>
+                )}
+                {tokenGateNotice.blocksLeft !== null && tokenGateNotice.blocksLeft > 0 && (
+                  <div className="detail-row"><span className="muted">Blocks to go</span><span>{tokenGateNotice.blocksLeft.toLocaleString()}</span></div>
+                )}
+                <p className="muted" style={{ lineHeight: 1.5 }}>
+                  Registration opens here once the network reaches the fork. Nothing has been sent.
+                </p>
+              </>
+            )}
+            {tokenGateNotice.kind === 'server-behind' && (
+              <p className="warn" style={{ lineHeight: 1.5 }}>
+                ⚠ {CONFIG.NETWORK_LABEL} has reached the token fork, but this wallet's server has not been
+                upgraded for privacy tokens yet. Try again once it has. Nothing has been sent.
+              </p>
+            )}
+            {tokenGateNotice.kind === 'unknown' && (
+              <p className="warn" style={{ lineHeight: 1.5 }}>
+                ⚠ Could not confirm with the server that privacy tokens are live on {CONFIG.NETWORK_LABEL}.
+                Check your connection and try again. Nothing has been sent.
+              </p>
+            )}
+            <button className="btn-primary" style={{ width: '100%', marginTop: 8 }} onClick={() => setTokenGateNotice(null)}>OK</button>
+          </div>
+        </div>
+      )}
 
       {selectedTx && (() => {
         const delta = parseAtomic(selectedTx.total_received) - parseAtomic(selectedTx.total_sent)
