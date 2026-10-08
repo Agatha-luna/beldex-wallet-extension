@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { sendToBackground, WalletMeta, WalletSecrets } from '../../lib/messages'
 import { Onboarding } from './Onboarding'
-import { correctedTotalSent, verifiedTokenBalances } from '../../lib/spent'
+import { correctedTotalSent, correctTokenLegs, verifiedTokenBalances } from '../../lib/spent'
+import type { TokenLegWire } from '../../lib/tokenLegs'
 import { fmtBDX, parseAtomic, toAtomic, absBig, toBdxFloat } from '../../lib/money'
 import * as lws from '../../lib/lws'
 import { sendFunds, SEND_STEPS } from '../../lib/send'
@@ -31,11 +32,7 @@ const POLL_MS = 10_000 // Beldex block time ~30s; poll LWS every 10s while popup
 // that a genuinely dropped registration doesn't sit mislabelled all day.
 const UNMINED_GRACE_MS = 20 * 60 * 1000
 
-interface TokenLeg {
-  token_id: string
-  received: string
-  sent: string
-}
+type TokenLeg = TokenLegWire
 
 interface Tx {
   hash: string
@@ -326,6 +323,7 @@ export function Dashboard({ address, walletName, wallets, network, onLocked }:
         i.total_sent = String(await correctedTotalSent(s, i))
         for (const tx of t.transactions ?? []) {
           tx.total_sent = String(await correctedTotalSent(s, tx))
+          await correctTokenLegs(s, tx.token_legs, parseAtomic(tx.total_sent))
         }
         // Publish the key-image-corrected figures for the dapp bridge: the
         // background can't run the WASM, so without this a dapp's getBalance

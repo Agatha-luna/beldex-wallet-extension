@@ -14,13 +14,10 @@ import { generateKeyImage } from './bridge'
 import { parseAtomic } from './money'
 import type { WalletSecrets } from './messages'
 import type { TokenOutputCandidate } from './tokenApi'
+import { correctLegs } from './tokenLegs'
+import type { SpentCandidate, TokenLegWire } from './tokenLegs'
 
-export interface SpentCandidate {
-  amount: string
-  key_image: string
-  tx_pub_key: string
-  out_index: number
-}
+export type { SpentCandidate } from './tokenLegs'
 
 // Key images are deterministic per (address, txPub, outIndex) — cache for the
 // panel's lifetime. Keyed by wallet address too, so switching wallets can't
@@ -61,6 +58,11 @@ export async function correctedTotalSent(
   const fake = await falseSpendSum(s, obj.spent_outputs)
   const corrected = claimed - fake
   return corrected > 0n ? corrected : 0n
+}
+
+/** Corrects each token leg's `sent` in place — see lib/tokenLegs. */
+export function correctTokenLegs(s: WalletSecrets, legs: TokenLegWire[] | undefined, realBdxSent: bigint): Promise<void> {
+  return correctLegs(legs, realBdxSent, candidates => falseSpendSum(s, candidates))
 }
 
 /**
