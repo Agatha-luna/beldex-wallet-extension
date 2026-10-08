@@ -9,12 +9,17 @@
 // port — no "tabs" permission, we never read URLs): green dot when connected
 // to this wallet (with a one-click disconnect icon), grey dot when not.
 // The ▴ chevron expands the full connected-sites list, each row with its own
-// disconnect icon. Live-updates on grant changes + a light active-tab poll.
+// disconnect icon. Live-updates on grant changes, wallet switches and the
+// panel becoming visible again, plus a light active-tab poll. The poll alone is
+// not enough: Chrome throttles timers in a hidden side panel (another tab, or
+// the per-tab panel an approval opens) to about once a minute, so a panel
+// shown again kept its old "Not connected" until the next tick came round.
 
 import { useEffect, useState } from 'react'
 import { sendToBackground } from '../../lib/messages'
 
 const GRANTS_KEY = 'dapp_origins' // keep in sync with src/background/dapp.ts
+const ACTIVE_KEY = 'active_wallet_id' // likewise
 const ACTIVE_POLL_MS = 2500
 
 export function UnlinkIcon() {
@@ -39,7 +44,7 @@ export function useConnectedSites() {
   useEffect(() => {
     load()
     const onChanged = (changes: Record<string, unknown>, area: string) => {
-      if (area === 'local' && GRANTS_KEY in changes) load()
+      if (area === 'local' && (GRANTS_KEY in changes || ACTIVE_KEY in changes)) load()
     }
     chrome.storage.onChanged.addListener(onChanged)
     return () => chrome.storage.onChanged.removeListener(onChanged)
@@ -92,7 +97,20 @@ export function SiteConnectionBar({ walletName }: { walletName: string }) {
         .catch(() => {})
     poll()
     const t = setInterval(poll, ACTIVE_POLL_MS)
-    return () => { stop = true; clearInterval(t) }
+    const onVisible = () => { if (document.visibilityState === 'visible') poll() }
+    const onChanged = (changes: Record<string, unknown>, area: string) => {
+      if (area === 'local' && (GRANTS_KEY in changes || ACTIVE_KEY in changes)) poll()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', poll)
+    chrome.storage.onChanged.addListener(onChanged)
+    return () => {
+      stop = true
+      clearInterval(t)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', poll)
+      chrome.storage.onChanged.removeListener(onChanged)
+    }
   }, [])
 
   // Nothing useful to show: no site in the active tab and nothing connected.
@@ -140,7 +158,7 @@ export function SiteConnectionBar({ walletName }: { walletName: string }) {
                 {host(active.origin)}
               </div>
               <div className="muted" style={{ fontSize: 10 }}>
-                {active.connected ? (walletName || 'Connected') : 'Not connected'}
+                {active.connected ? (walletName ? `Connected · ${walletName}` : 'Connected') : 'Not connected'}
               </div>
             </div>
             {active.connected && (
